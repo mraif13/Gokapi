@@ -1,5 +1,4 @@
 //go:build !noaws && !awsmock
-// +build !noaws,!awsmock
 
 package aws
 
@@ -14,6 +13,7 @@ import (
 	"github.com/forceu/gokapi/internal/models"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -30,7 +30,18 @@ const IsMockApi = false
 // Init reads the credentials for AWS. Returns true if valid
 func Init(config models.AwsConfig) bool {
 	awsConfig = config
-	return isValidLogin()
+	ok, err := IsValidLogin(config)
+	if err != nil {
+		fmt.Println("WARNING: AWS login not successful")
+		fmt.Println(err.Error())
+		isCorrectLogin = false
+		return false
+	}
+	if ok {
+		fmt.Println("AWS login successful")
+		isCorrectLogin = true
+	}
+	return ok
 }
 
 // AddBucketName adds the bucket name to the file to be stored
@@ -43,26 +54,25 @@ func IsAvailable() bool {
 	return isCorrectLogin
 }
 
-// LogOut resets the credentials, only used for testing purposes
+// LogOut resets the credentials
 func LogOut() {
 	awsConfig = models.AwsConfig{}
 	isCorrectLogin = false
 }
 
-func isValidLogin() bool {
-	if !awsConfig.IsAllProvided() {
-		return false
+// IsValidLogin checks if a valid login was provided
+func IsValidLogin(config models.AwsConfig) (bool, error) {
+	if !config.IsAllProvided() {
+		return false, nil
 	}
-	_, err := FileExists(models.File{AwsBucket: awsConfig.Bucket, SHA256: "invalid"})
+	tempConfig := awsConfig
+	awsConfig = config
+	_, _, err := FileExists(models.File{AwsBucket: awsConfig.Bucket, SHA256: "invalid"})
+	awsConfig = tempConfig
 	if err != nil {
-		fmt.Println("WARNING: AWS login not successful")
-		fmt.Println(err.Error())
-		isCorrectLogin = false
-		return false
+		return false, err
 	}
-	fmt.Println("AWS login successful")
-	isCorrectLogin = true
-	return true
+	return true, nil
 }
 
 func createSession() *session.Session {
@@ -135,11 +145,11 @@ func RedirectToDownload(w http.ResponseWriter, r *http.Request, file models.File
 }
 
 // FileExists returns true if the object is stored in S3
-func FileExists(file models.File) (bool, error) {
+func FileExists(file models.File) (bool, int64, error) {
 	sess := createSession()
 	svc := s3.New(sess)
 
-	_, err := svc.HeadObject(&s3.HeadObjectInput{
+	info, err := svc.HeadObject(&s3.HeadObjectInput{
 		Bucket: aws.String(file.AwsBucket),
 		Key:    aws.String(file.SHA256),
 	})
@@ -148,12 +158,12 @@ func FileExists(file models.File) (bool, error) {
 		aerr, ok := err.(awserr.Error)
 		if ok {
 			if aerr.Code() == "NotFound" {
-				return false, nil
+				return false, 0, nil
 			}
 		}
-		return false, err
+		return false, 0, err
 	}
-	return true, nil
+	return true, *info.ContentLength, nil
 }
 
 // DeleteObject deletes a file from S3
@@ -170,4 +180,33 @@ func DeleteObject(file models.File) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// IsCorsCorrectlySet returns true if CORS rules allow download from Gokapi
+func IsCorsCorrectlySet(bucket, gokapiUrl string) (bool, error) {
+	sess := createSession()
+	svc := s3.New(sess)
+	input := &s3.GetBucketCorsInput{
+		Bucket: aws.String(bucket),
+	}
+	result, err := svc.GetBucketCors(input)
+	if err != nil {
+		aerr, ok := err.(awserr.Error)
+		if ok && aerr.Code() == "NoSuchCorsConfiguration" {
+			return false, nil
+		}
+		return false, err
+	}
+
+	for _, rule := range result.CORSRules {
+		for _, origin := range rule.AllowedOrigins {
+			if *origin == "*" {
+				return true, nil
+			}
+			if strings.HasPrefix(gokapiUrl, *origin) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }

@@ -1,12 +1,11 @@
 //go:build !integration && test
-// +build !integration,test
 
 package webserver
 
 import (
 	"errors"
 	"github.com/forceu/gokapi/internal/configuration"
-	"github.com/forceu/gokapi/internal/configuration/datastorage"
+	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/test"
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
 	"github.com/forceu/gokapi/internal/webserver/authentication"
@@ -17,9 +16,6 @@ import (
 	"testing"
 	"time"
 )
-
-// Please note that if this test is run with go test -race, it will fail as there is a bug in html/template that
-// causes data race. It will be fixed in Go 1.17, see https://github.com/golang/go/issues/39807
 
 func TestMain(m *testing.M) {
 	testconfiguration.Create(true)
@@ -514,7 +510,7 @@ func TestApiPageNotAuthorized(t *testing.T) {
 
 func TestNewApiKey(t *testing.T) {
 	// Authorised
-	amountKeys := len(datastorage.GetAllApiKeys())
+	amountKeys := len(database.GetAllApiKeys())
 	test.HttpPageResult(t, test.HttpTestConfig{
 		Url:             "http://127.0.0.1:53843/apiNew",
 		IsHtml:          true,
@@ -525,7 +521,7 @@ func TestNewApiKey(t *testing.T) {
 			Value: "validsession",
 		}},
 	})
-	amountKeysAfter := len(datastorage.GetAllApiKeys())
+	amountKeysAfter := len(database.GetAllApiKeys())
 	test.IsEqualInt(t, amountKeysAfter, amountKeys+1)
 	test.IsEqualInt(t, amountKeysAfter, 5)
 
@@ -541,14 +537,14 @@ func TestNewApiKey(t *testing.T) {
 			Value: "invalid",
 		}},
 	})
-	amountKeysAfter = len(datastorage.GetAllApiKeys())
+	amountKeysAfter = len(database.GetAllApiKeys())
 	test.IsEqualInt(t, amountKeysAfter, amountKeys)
 	test.IsEqualInt(t, amountKeysAfter, 5)
 }
 
 func TestDeleteApiKey(t *testing.T) {
 	// Not authorised
-	amountKeys := len(datastorage.GetAllApiKeys())
+	amountKeys := len(database.GetAllApiKeys())
 	test.HttpPageResult(t, test.HttpTestConfig{
 		Url:             "http://127.0.0.1:53843/apiDelete?id=jiREglQJW0bOqJakfjdVfe8T1EM8n8",
 		IsHtml:          true,
@@ -559,8 +555,8 @@ func TestDeleteApiKey(t *testing.T) {
 			Value: "invalid",
 		}},
 	})
-	amountKeysAfter := len(datastorage.GetAllApiKeys())
-	key, ok := datastorage.GetApiKey("jiREglQJW0bOqJakfjdVfe8T1EM8n8")
+	amountKeysAfter := len(database.GetAllApiKeys())
+	key, ok := database.GetApiKey("jiREglQJW0bOqJakfjdVfe8T1EM8n8")
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualString(t, key.Id, "jiREglQJW0bOqJakfjdVfe8T1EM8n8")
 	test.IsEqualInt(t, amountKeysAfter, amountKeys)
@@ -577,8 +573,8 @@ func TestDeleteApiKey(t *testing.T) {
 			Value: "validsession",
 		}},
 	})
-	amountKeysAfter = len(datastorage.GetAllApiKeys())
-	_, ok = datastorage.GetApiKey("jiREglQJW0bOqJakfjdVfe8T1EM8n8")
+	amountKeysAfter = len(database.GetAllApiKeys())
+	_, ok = database.GetApiKey("jiREglQJW0bOqJakfjdVfe8T1EM8n8")
 	test.IsEqualBool(t, ok, false)
 	test.IsEqualInt(t, amountKeysAfter, amountKeys-1)
 	test.IsEqualInt(t, amountKeysAfter, 4)

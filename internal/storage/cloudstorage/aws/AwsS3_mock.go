@@ -1,5 +1,4 @@
 //go:build !noaws && awsmock
-// +build !noaws,awsmock
 
 package aws
 
@@ -11,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 )
 
 var uploadedFiles []models.File
@@ -49,7 +49,12 @@ func IsAvailable() bool {
 	return isCorrectLogin
 }
 
-// LogOut resets the credentials, only used for testing purposes
+// IsValidLogin checks if a valid login was provided
+func IsValidLogin(config models.AwsConfig) (bool, error) {
+	return isValidCredentials(), nil
+}
+
+// LogOut resets the credentials
 func LogOut() {
 	isCorrectLogin = false
 }
@@ -137,12 +142,15 @@ func RedirectToDownload(w http.ResponseWriter, r *http.Request, file models.File
 }
 
 // FileExists returns true if the object is stored in S3
-func FileExists(file models.File) (bool, error) {
+func FileExists(file models.File) (bool, int64, error) {
 	if !isValidCredentials() {
-		return false, errors.New("invalid credentials / invalid bucket / invalid region")
+		return false, 0, errors.New("invalid credentials / invalid bucket / invalid region")
+	}
+	if !isUploaded(file) {
+		return false, 0, nil
 	}
 
-	return isUploaded(file), nil
+	return true, 10000, nil
 }
 
 // DeleteObject deletes a file from S3
@@ -160,4 +168,22 @@ func DeleteObject(file models.File) (bool, error) {
 	uploadedFiles = buffer
 
 	return true, nil
+}
+
+// IsCorsCorrectlySet returns true if CORS rules allow download from Gokapi
+func IsCorsCorrectlySet(bucket, gokapiUrl string) (bool, error) {
+	switch bucket {
+	case "any":
+		return true, nil
+	case "none":
+		return false, nil
+	case "forbidden":
+		return false, errors.New("forbidden")
+	case "https":
+		return strings.HasPrefix(gokapiUrl, "https://"), nil
+	case "url":
+		return strings.HasPrefix(gokapiUrl, "http://test.com"), nil
+	default:
+		return false, errors.New("unknown")
+	}
 }

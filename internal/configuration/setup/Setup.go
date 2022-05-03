@@ -44,6 +44,8 @@ var password string
 
 var serverStarted = false
 
+const debugDisableAuth = false
+
 // RunIfFirstStart checks if config files exist and if not start a blocking webserver for setup
 func RunIfFirstStart() {
 	if !configuration.Exists() {
@@ -71,7 +73,7 @@ func RunConfigModification() {
 func basicAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// No auth required on initial setup
-		if isInitialSetup {
+		if isInitialSetup || debugDisableAuth {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -100,6 +102,7 @@ func startSetupWebserver() {
 	mux.Handle("/setup/", http.FileServer(http.FS(webserverDir)))
 	mux.HandleFunc("/setup/start", basicAuth(handleShowSetup))
 	mux.HandleFunc("/setup/setupResult", basicAuth(handleResult))
+	mux.HandleFunc("/setup/testaws", basicAuth(handleTestAws))
 
 	srv = http.Server{
 		Addr:         ":" + port,
@@ -332,6 +335,12 @@ func parseServerSettings(result *models.Configuration, formObjects *[]jsonFormOb
 	}
 
 	result.ServerUrl = addTrailingSlash(result.ServerUrl)
+
+	picturesAlwaysLocal, err := getFormValueString(formObjects, "storage_sel_image")
+	if err != nil {
+		return err
+	}
+	result.PicturesAlwaysLocal = picturesAlwaysLocal == "local"
 	return nil
 }
 
@@ -557,4 +566,52 @@ func verifyPortNumber(port int) int {
 		return environment.DefaultPort
 	}
 	return port
+}
+
+type testAwsRequest struct {
+	Bucket    string `json:"bucket"`
+	Region    string `json:"region"`
+	ApiKey    string `json:"apikey"`
+	ApiSecret string `json:"apisecret"`
+	Endpoint  string `json:"endpoint"`
+	GokapiUrl string `json:"exturl"`
+}
+
+// Handling of /testaws
+func handleTestAws(w http.ResponseWriter, r *http.Request) {
+	decoder := json.NewDecoder(r.Body)
+	var t testAwsRequest
+	err := decoder.Decode(&t)
+	if err != nil {
+		w.Write([]byte("Error: " + err.Error()))
+		return
+	}
+	awsconfig := models.AwsConfig{
+		Bucket:    t.Bucket,
+		Region:    t.Region,
+		KeyId:     t.ApiKey,
+		KeySecret: t.ApiSecret,
+		Endpoint:  t.Endpoint,
+	}
+	ok, err := aws.IsValidLogin(awsconfig)
+	if err != nil {
+		w.Write([]byte("Error: " + err.Error()))
+		return
+	}
+	if !ok {
+		w.Write([]byte("Error: Invalid or incomplete credentials provided"))
+		return
+	}
+	aws.Init(awsconfig)
+	ok, err = aws.IsCorsCorrectlySet(t.Bucket, t.GokapiUrl)
+	aws.LogOut()
+	if err != nil {
+		w.Write([]byte("Could not check CORS settings. Error: " + err.Error()))
+		return
+	}
+	if !ok {
+		w.Write([]byte("Test OK, however CORS settings do not allow encrypted downloads."))
+		return
+	}
+	w.Write([]byte("Test OK, CORS settings allow encrypted downloads."))
 }

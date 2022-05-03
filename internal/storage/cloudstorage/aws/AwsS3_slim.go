@@ -1,5 +1,4 @@
 //go:build noaws
-// +build noaws
 
 package aws
 
@@ -28,6 +27,11 @@ func IsAvailable() bool {
 	return false
 }
 
+// IsValidLogin checks if a valid login was provided
+func IsValidLogin(config models.AwsConfig) (bool, error) {
+	return false, errors.New(errorString)
+}
+
 // AddBucketName adds the bucket name to the file to be stored
 func AddBucketName(file *models.File) {
 	return
@@ -43,7 +47,7 @@ func Download(writer io.WriterAt, file models.File) (int64, error) {
 	return 0, errors.New(errorString)
 }
 
-// LogOut resets the credentials, only used for testing purposes
+// LogOut resets the credentials
 func LogOut() {
 }
 
@@ -54,11 +58,16 @@ func RedirectToDownload(w http.ResponseWriter, r *http.Request, file models.File
 }
 
 // FileExists returns true if the object is stored in S3
-func FileExists(file models.File) (bool, error) {
-	return true, errors.New(errorString)
+func FileExists(file models.File) (bool, int64, error) {
+	return true, 0, errors.New(errorString)
 }
 
 // DeleteObject deletes a file from S3
 func DeleteObject(file models.File) (bool, error) {
+	return false, errors.New(errorString)
+}
+
+// IsCorsCorrectlySet returns true if CORS rules allow download from Gokapi
+func IsCorsCorrectlySet(bucket, gokapiUrl string) (bool, error) {
 	return false, errors.New(errorString)
 }

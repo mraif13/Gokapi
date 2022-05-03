@@ -293,7 +293,18 @@
 					
 {{ if not .HasAwsFeature }}
 					<p><br><br><i>This build has been compiled without AWS support, therefore cloud storage is not available.</i></p>
-{{ end }}					
+{{ else }}
+
+					<br><p>
+						Select if you want to store pictures always locally. Choose this if you want to use full encryption but still be able to have hotlink support.
+					</p>
+					<select name="storage_sel_image" id="storage_sel_image" style="width:350px;" class="select form-control">
+							<option value="nochange" selected>As above</option>
+							<option value="local">Always local Storage</option>
+
+					</select>
+{{ end }}
+					
 
 				</div>
 			</div>
@@ -326,10 +337,46 @@
 							<div class="col-sm-8">
 							  <label for="s3_endpoint">Endpoint:</label>
 								<input type="text" class="form-control" id="s3_endpoint" name="s3_endpoint" placeholder="Endpoint (leave blank if AWS S3)">
+							<br><br>
+	  						 <button id="downloadbutton" class="btn btn-light" type="button" onclick="TestAWS(this);">
+			  					Test configuration
+			  				</button>
 							</div>
 						</div>
 				</div>
 			</div>
+
+<script>
+function TestAWS(button) {
+	button.disabled=true;
+	button.innerHTML="Connecting...";
+
+	var xhr = new XMLHttpRequest();
+	xhr.onreadystatechange = function() {
+		if (this.readyState === XMLHttpRequest.DONE) {
+			if (this.status == 200) {
+				button.innerHTML="Test configuration";
+				button.disabled=false;
+				alert(xhr.responseText);
+		    	} else {
+			alert("ey");
+			// Server Error
+			}
+		}
+	};
+
+	xhr.open("POST", "./testaws", true);
+	xhr.setRequestHeader('Content-Type', 'application/json');
+	xhr.send(JSON.stringify({
+	    bucket: document.getElementById("s3_bucket").value,
+	    region: document.getElementById("s3_region").value,
+	    apikey: document.getElementById("s3_api").value,
+	    apisecret: document.getElementById("s3_secret").value,
+	    endpoint: document.getElementById("s3_endpoint").value
+	}));
+
+}
+</script>
 			
 
 			<!-- Step 7 Encryption -->

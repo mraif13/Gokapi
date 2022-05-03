@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/forceu/gokapi/internal/configuration"
-	"github.com/forceu/gokapi/internal/configuration/datastorage"
+	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/logging"
@@ -20,6 +20,7 @@ import (
 	"github.com/forceu/gokapi/internal/webserver/downloadstatus"
 	"io"
 	"io/ioutil"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -37,7 +38,7 @@ func NewFile(fileContent io.Reader, fileHeader *multipart.FileHeader, uploadRequ
 		return models.File{}, errors.New("upload limit exceeded")
 	}
 	var hasBeenRenamed bool
-	reader, hash, tempFile, encInfo := generateHash(fileContent, fileHeader, uploadRequest, configuration.Get().Encryption.Level)
+	reader, hash, tempFile, encInfo := generateHash(fileContent, fileHeader, uploadRequest)
 	defer deleteTempFile(tempFile, &hasBeenRenamed)
 	id := helper.GenerateRandomString(configuration.Get().LengthId)
 	file := models.File{
@@ -55,22 +56,30 @@ func NewFile(fileContent io.Reader, fileHeader *multipart.FileHeader, uploadRequ
 		UnlimitedDownloads: uploadRequest.UnlimitedDownload,
 	}
 	if aws.IsAvailable() {
-		aws.AddBucketName(&file)
+		if !configuration.Get().PicturesAlwaysLocal || !isPictureFile(file.Name) {
+			aws.AddBucketName(&file)
+		}
 	}
 	addHotlink(&file)
 	filename := configuration.Get().DataDir + "/" + file.SHA256
 	dataDir := configuration.Get().DataDir
-	if aws.IsAvailable() {
-		aws.AddBucketName(&file)
-		_, err := aws.Upload(reader, file)
+
+	if file.AwsBucket != "" {
+		exists, size, err := aws.FileExists(file)
 		if err != nil {
 			return models.File{}, err
 		}
-		datastorage.SaveMetaData(file)
+		if !exists || (size == 0 && file.Size != "0 B") {
+			_, err = aws.Upload(reader, file)
+			if err != nil {
+				return models.File{}, err
+			}
+		}
+		database.SaveMetaData(file)
 		return file, nil
 	}
 
-	fileWithHashExists := helper.FileExists(dataDir + "/" + file.SHA256)
+	fileWithHashExists := FileExists(file, configuration.Get().DataDir)
 	if fileWithHashExists {
 		encryptionLevel := configuration.Get().Encryption.Level
 		previousEncryption, ok := getEncInfoFromExistingFile(file.SHA256)
@@ -90,7 +99,7 @@ func NewFile(fileContent io.Reader, fileHeader *multipart.FileHeader, uploadRequ
 			err = os.Rename(tempFile.Name(), dataDir+"/"+file.SHA256)
 			helper.Check(err)
 			hasBeenRenamed = true
-			datastorage.SaveMetaData(file)
+			database.SaveMetaData(file)
 			return file, nil
 		}
 		destinationFile, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
@@ -103,7 +112,7 @@ func NewFile(fileContent io.Reader, fileHeader *multipart.FileHeader, uploadRequ
 			return models.File{}, err
 		}
 	}
-	datastorage.SaveMetaData(file)
+	database.SaveMetaData(file)
 	return file, nil
 }
 
@@ -112,7 +121,7 @@ func getEncInfoFromExistingFile(hash string) (models.EncryptionInfo, bool) {
 	if encryptionLevel == encryption.NoEncryption || encryptionLevel == encryption.EndToEndEncryption {
 		return models.EncryptionInfo{}, true
 	}
-	allFiles := datastorage.GetAllMetadata()
+	allFiles := database.GetAllMetadata()
 	for _, existingFile := range allFiles {
 		if existingFile.SHA256 == hash {
 			return existingFile.Encryption, true
@@ -132,7 +141,7 @@ func deleteTempFile(file *os.File, hasBeenRenamed *bool) {
 
 // DeleteAllEncrypted marks all encrypted files for deletion on next cleanup
 func DeleteAllEncrypted() {
-	files := datastorage.GetAllMetadata()
+	files := database.GetAllMetadata()
 	for _, file := range files {
 		if file.Encryption.IsEncrypted {
 			DeleteFile(file.Id, false)
@@ -142,14 +151,14 @@ func DeleteAllEncrypted() {
 
 // Generates the SHA1 hash of an uploaded file and returns a reader for the file, the hash and if a temporary file was created the
 // reference to that file.
-func generateHash(fileContent io.Reader, fileHeader *multipart.FileHeader, uploadRequest models.UploadRequest, encryptionLevel int) (io.Reader, []byte, *os.File, models.EncryptionInfo) {
+func generateHash(fileContent io.Reader, fileHeader *multipart.FileHeader, uploadRequest models.UploadRequest) (io.Reader, []byte, *os.File, models.EncryptionInfo) {
 	hash := sha1.New()
 	encInfo := models.EncryptionInfo{}
 	if fileHeader.Size <= int64(uploadRequest.MaxMemory)*1024*1024 {
 		content, err := ioutil.ReadAll(fileContent)
 		helper.Check(err)
 		hash.Write(content)
-		if encryptionLevel != encryption.NoEncryption && encryptionLevel != encryption.EndToEndEncryption {
+		if isEncryptionRequested() {
 			encContent := new(bytes.Buffer)
 			err = encryption.Encrypt(&encInfo, bytes.NewReader(content), encContent)
 			helper.Check(err)
@@ -168,7 +177,7 @@ func generateHash(fileContent io.Reader, fileHeader *multipart.FileHeader, uploa
 	_, err = tempFile.Seek(0, io.SeekStart)
 	helper.Check(err)
 
-	if encryptionLevel != encryption.NoEncryption && encryptionLevel != encryption.EndToEndEncryption {
+	if isEncryptionRequested() {
 		tempFileEnc, err := os.CreateTemp(uploadRequest.DataDir, "upload")
 		helper.Check(err)
 		encryption.Encrypt(&encInfo, tempFile, tempFileEnc)
@@ -181,6 +190,24 @@ func generateHash(fileContent io.Reader, fileHeader *multipart.FileHeader, uploa
 	return tempFile, hash.Sum(nil), tempFile, encInfo
 }
 
+func isEncryptionRequested() bool {
+	switch configuration.Get().Encryption.Level {
+	case encryption.NoEncryption:
+		return false
+	case encryption.LocalEncryptionStored:
+		fallthrough
+	case encryption.LocalEncryptionInput:
+		return !aws.IsAvailable()
+	case encryption.FullEncryptionStored:
+		fallthrough
+	case encryption.FullEncryptionInput:
+		return true
+	default:
+		log.Fatalln("Unknown encryption level requested")
+		return false
+	}
+}
+
 var imageFileExtensions = []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
 
 // If file is an image, create link for hotlinking
@@ -188,13 +215,21 @@ func addHotlink(file *models.File) {
 	if RequiresClientDecryption(*file) {
 		return
 	}
-	extension := strings.ToLower(filepath.Ext(file.Name))
-	if !helper.IsInArray(imageFileExtensions, extension) {
+	if !isPictureFile(file.Name) {
 		return
 	}
-	link := helper.GenerateRandomString(40) + extension
+	link := helper.GenerateRandomString(40) + getFileExtension(file.Name)
 	file.HotlinkId = link
-	datastorage.SaveHotlink(*file)
+	database.SaveHotlink(*file)
+}
+
+func getFileExtension(filename string) string {
+	return strings.ToLower(filepath.Ext(filename))
+}
+
+func isPictureFile(filename string) bool {
+	extension := getFileExtension(filename)
+	return helper.IsInArray(imageFileExtensions, extension)
 }
 
 // GetFile gets the file by id. Returns (empty File, false) if invalid / expired file
@@ -204,7 +239,7 @@ func GetFile(id string) (models.File, bool) {
 	if id == "" {
 		return emptyResult, false
 	}
-	file, ok := datastorage.GetMetaDataById(id)
+	file, ok := database.GetMetaDataById(id)
 	if !ok {
 		return emptyResult, false
 	}
@@ -224,7 +259,7 @@ func GetFileByHotlink(id string) (models.File, bool) {
 	if id == "" {
 		return emptyResult, false
 	}
-	fileId, ok := datastorage.GetHotlink(id)
+	fileId, ok := database.GetHotlink(id)
 	if !ok {
 		return emptyResult, false
 	}
@@ -243,7 +278,8 @@ func RequiresClientDecryption(file models.File) bool {
 // ServeFile subtracts a download allowance and serves the file to the browser
 func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDownload bool) {
 	file.DownloadsRemaining = file.DownloadsRemaining - 1
-	datastorage.SaveMetaData(file)
+	file.DownloadCount = file.DownloadCount + 1
+	database.SaveMetaData(file)
 	logging.AddDownload(&file, r)
 
 	// If file is stored on AWS
@@ -296,7 +332,7 @@ func getFileHandler(file models.File, dataDir string) (*os.File, int64) {
 // FileExists checks if the file exists locally or in S3
 func FileExists(file models.File, dataDir string) bool {
 	if file.AwsBucket != "" {
-		result, err := aws.FileExists(file)
+		result, _, err := aws.FileExists(file)
 		if err != nil {
 			fmt.Println("Warning, cannot check file " + file.Id + ": " + err.Error())
 			return true
@@ -313,11 +349,11 @@ func CleanUp(periodic bool) {
 	downloadstatus.Clean()
 	timeNow := time.Now().Unix()
 	wasItemDeleted := false
-	for key, element := range datastorage.GetAllMetadata() {
+	for key, element := range database.GetAllMetadata() {
 		fileExists := FileExists(element, configuration.Get().DataDir)
 		if !fileExists || isExpiredFileWithoutDownload(element, timeNow) {
 			deleteFile := true
-			for _, secondLoopElement := range datastorage.GetAllMetadata() {
+			for _, secondLoopElement := range database.GetAllMetadata() {
 				if (element.Id != secondLoopElement.Id) && (element.SHA256 == secondLoopElement.SHA256) {
 					deleteFile = false
 				}
@@ -326,9 +362,9 @@ func CleanUp(periodic bool) {
 				deleteSource(element, configuration.Get().DataDir)
 			}
 			if element.HotlinkId != "" {
-				datastorage.DeleteHotlink(element.HotlinkId)
+				database.DeleteHotlink(element.HotlinkId)
 			}
-			datastorage.DeleteMetaData(key)
+			database.DeleteMetaData(key)
 			wasItemDeleted = true
 		}
 	}
@@ -337,11 +373,13 @@ func CleanUp(periodic bool) {
 	}
 	if periodic {
 		go func() {
-			time.Sleep(time.Hour)
-			CleanUp(periodic)
+			select {
+			case <-time.After(time.Hour):
+				CleanUp(periodic)
+			}
 		}()
 	}
-	datastorage.RunGarbageCollection()
+	database.RunGarbageCollection()
 }
 
 // IsExpiredFile returns true if the file is expired, either due to download count
@@ -362,12 +400,11 @@ func deleteSource(file models.File, dataDir string) {
 	var err error
 	if file.AwsBucket != "" {
 		_, err = aws.DeleteObject(file)
-		helper.Check(err)
 	} else {
 		err = os.Remove(dataDir + "/" + file.SHA256)
 	}
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("Warning, cannot delete file " + file.Id + ": " + err.Error())
 	}
 }
 
@@ -377,13 +414,13 @@ func DeleteFile(keyId string, deleteSource bool) bool {
 	if keyId == "" {
 		return false
 	}
-	item, ok := datastorage.GetMetaDataById(keyId)
+	item, ok := database.GetMetaDataById(keyId)
 	if !ok {
 		return false
 	}
 	item.ExpireAt = 0
 	item.UnlimitedTime = false
-	datastorage.SaveMetaData(item)
+	database.SaveMetaData(item)
 	for _, status := range downloadstatus.GetAll() {
 		if status.FileId == item.Id {
 			downloadstatus.SetComplete(status.Id)

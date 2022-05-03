@@ -7,7 +7,7 @@ import (
 	"errors"
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/cloudconfig"
-	"github.com/forceu/gokapi/internal/configuration/datastorage"
+	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/environment"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/test"
@@ -30,6 +30,10 @@ func TestMain(m *testing.M) {
 	exitVal := m.Run()
 	testconfiguration.Delete()
 	os.Exit(exitVal)
+}
+
+func TestDebugNotSet(t *testing.T) {
+	test.IsEqualBool(t, debugDisableAuth, false)
 }
 
 func TestInputToJson(t *testing.T) {
@@ -84,46 +88,46 @@ func TestEncryptionSetup(t *testing.T) {
 	configuration.Load()
 	configuration.Get().Encryption.Level = 3
 	id := testconfiguration.WriteEncryptedFile()
-	file, ok := datastorage.GetMetaDataById(id)
+	file, ok := database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, file.UnlimitedTime, true)
 	formObjects, err = input.toFormObject()
 	test.IsNil(t, err)
 	config, _, err = toConfiguration(&formObjects)
 	test.IsNil(t, err)
-	file, ok = datastorage.GetMetaDataById(id)
+	file, ok = database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, file.UnlimitedTime, false)
 
 	configuration.Get().Encryption.Level = 2
 	input.EncryptionPassword.Value = "unc"
 	id = testconfiguration.WriteEncryptedFile()
-	_, ok = datastorage.GetMetaDataById(id)
+	_, ok = database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)
 	formObjects, err = input.toFormObject()
 	test.IsNil(t, err)
 	config, _, err = toConfiguration(&formObjects)
 	test.IsNil(t, err)
-	file, ok = datastorage.GetMetaDataById(id)
+	file, ok = database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, file.UnlimitedTime, true)
 
-	_, ok = datastorage.GetMetaDataById(id)
+	_, ok = database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)
 	configuration.Get().Encryption.Level = 2
 	input.EncryptionPassword.Value = "otherpw"
 	id = testconfiguration.WriteEncryptedFile()
-	_, ok = datastorage.GetMetaDataById(id)
+	_, ok = database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)
 	formObjects, err = input.toFormObject()
 	test.IsNil(t, err)
 	config, _, err = toConfiguration(&formObjects)
 	test.IsNil(t, err)
-	file, ok = datastorage.GetMetaDataById(id)
+	file, ok = database.GetMetaDataById(id)
 	test.IsEqualBool(t, ok, true)
 	test.IsEqualBool(t, file.UnlimitedTime, false)
 
-	datastorage.Close()
+	database.Close()
 	testconfiguration.Delete()
 
 	isInitialSetup = true
@@ -404,6 +408,7 @@ func TestIntegration(t *testing.T) {
 	test.IsEqualBool(t, settings.UseSsl, true)
 	test.IsEqualString(t, settings.ServerUrl, "http://127.0.0.1:53842/")
 	test.IsEqualString(t, settings.RedirectUrl, "https://test.com")
+	test.IsEqualBool(t, settings.PicturesAlwaysLocal, false)
 	_, ok = cloudconfig.Load()
 	if os.Getenv("GOKAPI_AWS_BUCKET") == "" {
 		test.IsEqualBool(t, ok, false)
@@ -438,6 +443,7 @@ func TestIntegration(t *testing.T) {
 		}
 	}
 
+	test.IsEqualBool(t, settings.PicturesAlwaysLocal, true)
 	test.IsEqualString(t, settings.Authentication.OauthProvider, "provider")
 	test.IsEqualString(t, settings.Authentication.OAuthClientId, "id")
 	test.IsEqualString(t, settings.Authentication.OAuthClientSecret, "secret")
@@ -465,6 +471,7 @@ type setupValues struct {
 	AuthHeaderKey        setupEntry `form:"auth_headerkey"`
 	AuthHeaderUsers      setupEntry `form:"auth_header_users"`
 	StorageSelection     setupEntry `form:"storage_sel"`
+	PicturesAlwaysLocal  setupEntry `form:"storage_sel_image"`
 	S3Bucket             setupEntry `form:"s3_bucket"`
 	S3Region             setupEntry `form:"s3_region"`
 	S3ApiKey             setupEntry `form:"s3_api"`
@@ -597,6 +604,7 @@ func createInputInternalAuth() setupValues {
 	values.S3ApiSecret.Value = "testsecret"
 	values.S3Endpoint.Value = "testendpoint"
 	values.EncryptionLevel.Value = "0"
+	values.PicturesAlwaysLocal.Value = "nochange"
 
 	return values
 }
@@ -627,5 +635,6 @@ func createInputOAuth() setupValues {
 	values.OAuthClientSecret.Value = "secret"
 	values.OAuthAuthorisedUsers.Value = "oatest1; oatest2"
 	values.StorageSelection.Value = "local"
+	values.PicturesAlwaysLocal.Value = "local"
 	return values
 }
