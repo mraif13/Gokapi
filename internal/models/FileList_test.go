@@ -1,6 +1,7 @@
 package models
 
 import (
+	"errors"
 	"github.com/forceu/gokapi/internal/test"
 	"testing"
 )
@@ -10,7 +11,8 @@ func TestToJsonResult(t *testing.T) {
 		Id:                 "testId",
 		Name:               "testName",
 		Size:               "10 B",
-		SHA256:             "sha256",
+		SizeBytes:          10,
+		SHA1:               "sha256",
 		ExpireAt:           50,
 		ExpireAtString:     "future",
 		DownloadsRemaining: 1,
@@ -27,5 +29,17 @@ func TestToJsonResult(t *testing.T) {
 		UnlimitedDownloads: true,
 		UnlimitedTime:      true,
 	}
-	test.IsEqualString(t, file.ToJsonResult("serverurl/"), `{"Result":"OK","FileInfo":{"Id":"testId","Name":"testName","Size":"10 B","SHA256":"sha256","ExpireAt":50,"ExpireAtString":"future","DownloadsRemaining":1,"DownloadCount":3,"PasswordHash":"pwhash","HotlinkId":"hotlinkid","ContentType":"text/html","AwsBucket":"test","Encryption":{"IsEncrypted":true,"DecryptionKey":"AQ==","Nonce":"Ag=="},"UnlimitedDownloads":true,"UnlimitedTime":true},"Url":"serverurl/d?id=","HotlinkUrl":"serverurl/hotlink/"}`)
+	test.IsEqualString(t, file.ToJsonResult("serverurl/", true), `{"Result":"OK","FileInfo":{"Id":"testId","Name":"testName","Size":"10 B","HotlinkId":"hotlinkid","ContentType":"text/html","ExpireAt":50,"SizeBytes":10,"ExpireAtString":"future","DownloadsRemaining":1,"DownloadCount":3,"UnlimitedDownloads":true,"UnlimitedTime":true,"RequiresClientSideDecryption":true,"IsEncrypted":true,"IsPasswordProtected":true,"IsSavedOnLocalStorage":false},"Url":"serverurl/d?id=","HotlinkUrl":"serverurl/hotlink/","GenericHotlinkUrl":"serverurl/downloadFile?id="}`)
+}
+
+func TestIsLocalStorage(t *testing.T) {
+	file := File{AwsBucket: "123"}
+	test.IsEqualBool(t, file.IsLocalStorage(), false)
+	file.AwsBucket = ""
+	test.IsEqualBool(t, file.IsLocalStorage(), true)
+}
+
+func TestErrorAsJson(t *testing.T) {
+	result := errorAsJson(errors.New("testerror"))
+	test.IsEqualString(t, result, "{\"Result\":\"error\",\"ErrorMessage\":\"testerror\"}")
 }

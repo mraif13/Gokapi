@@ -220,14 +220,26 @@ func TestInvalidLink(t *testing.T) {
 		IsHtml:          true,
 	})
 }
+
 func TestError(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
 		Url:             "http://localhost:53843/error",
-		RequiredContent: []string{"this file cannot be found"},
+		RequiredContent: []string{"Sorry, this file cannot be found"},
+		IsHtml:          true,
+	})
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://localhost:53843/error?e2e",
+		RequiredContent: []string{"This file is encrypted and no key has been passed"},
+		IsHtml:          true,
+	})
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:             "http://localhost:53843/error?key",
+		RequiredContent: []string{"This file is encrypted and an incorrect key has been passed"},
 		IsHtml:          true,
 	})
 }
+
 func TestForgotPw(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
@@ -236,6 +248,7 @@ func TestForgotPw(t *testing.T) {
 		IsHtml:          true,
 	})
 }
+
 func TestLoginCorrect(t *testing.T) {
 	t.Parallel()
 	test.HttpPageResult(t, test.HttpTestConfig{
@@ -449,7 +462,13 @@ func TestDeleteFileInvalidKey(t *testing.T) {
 func TestPostUploadNoAuth(t *testing.T) {
 	t.Parallel()
 	test.HttpPostUploadRequest(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/upload",
+		Url:             "http://127.0.0.1:53843/uploadChunk",
+		UploadFileName:  "test/fileupload.jpg",
+		UploadFieldName: "file",
+		RequiredContent: []string{"{\"Result\":\"error\",\"ErrorMessage\":\"Not authenticated\"}"},
+	})
+	test.HttpPostUploadRequest(t, test.HttpTestConfig{
+		Url:             "http://127.0.0.1:53843/uploadComplete",
 		UploadFileName:  "test/fileupload.jpg",
 		UploadFieldName: "file",
 		RequiredContent: []string{"{\"Result\":\"error\",\"ErrorMessage\":\"Not authenticated\"}"},
@@ -458,11 +477,44 @@ func TestPostUploadNoAuth(t *testing.T) {
 
 func TestPostUpload(t *testing.T) {
 	test.HttpPostUploadRequest(t, test.HttpTestConfig{
-		Url:             "http://127.0.0.1:53843/upload",
+		Url:             "http://127.0.0.1:53843/uploadChunk",
 		UploadFileName:  "test/fileupload.jpg",
 		UploadFieldName: "file",
-		RequiredContent: []string{"{\"Result\":\"OK\"", "\"Name\":\"fileupload.jpg\"", "\"SHA256\":\"a9993e364706816aba3e25717850c26c9cd0d89d\"", "DownloadsRemaining\":3"},
-		ExcludedContent: []string{"\"Id\":\"\"", "HotlinkId\":\"\""},
+		PostValues: []test.PostBody{{
+			Key:   "dztotalfilesize",
+			Value: "50",
+		}, {
+			Key:   "dzchunkbyteoffset",
+			Value: "0",
+		}, {
+			Key:   "dzuuid",
+			Value: "eeng4ier3Taen7a",
+		}},
+		RequiredContent: []string{"{\"result\":\"OK\"}"},
+		ExcludedContent: []string{"\"Id\":\"\"", "HotlinkId\":\"\"", "ErrorMessage"},
+		Cookies: []test.Cookie{{
+			Name:  "session_token",
+			Value: "validsession",
+		}},
+	})
+
+	test.HttpPostRequest(t, test.HttpTestConfig{
+		Url: "http://127.0.0.1:53843/uploadComplete",
+		PostValues: []test.PostBody{{
+			Key:   "chunkid",
+			Value: "eeng4ier3Taen7a",
+		}, {
+			Key:   "filename",
+			Value: "fileupload.jpg",
+		}, {
+			Key:   "filecontenttype",
+			Value: "test-content",
+		}, {
+			Key:   "filesize",
+			Value: "50",
+		}},
+		RequiredContent: []string{"{\"Result\":\"OK\"", "\"Name\":\"fileupload.jpg\"", "DownloadsRemaining\":3"},
+		ExcludedContent: []string{"\"Id\":\"\"", "HotlinkId\":\"\"", "ErrorMessage"},
 		Cookies: []test.Cookie{{
 			Name:  "session_token",
 			Value: "validsession",
@@ -645,9 +697,9 @@ func TestDisableLogin(t *testing.T) {
 
 func TestResponseError(t *testing.T) {
 	w, _ := test.GetRecorder("GET", "/", nil, nil, nil)
-	err := errors.New("testerror")
-	defer test.ExpectPanic(t)
-	responseError(w, err)
+	responseError(w, errors.New("testerror"))
+	test.IsEqualInt(t, w.Result().StatusCode, 400)
+	test.ResponseBodyContains(t, w, "testerror")
 }
 
 func TestShowErrorAuth(t *testing.T) {
@@ -656,5 +708,20 @@ func TestShowErrorAuth(t *testing.T) {
 		Url:             "http://localhost:53843/error-auth",
 		RequiredContent: []string{"Log in as different user"},
 		IsHtml:          true,
+	})
+}
+
+func TestServeWasmDownloader(t *testing.T) {
+	t.Parallel()
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:    "http://localhost:53843/main.wasm",
+		IsHtml: false,
+	})
+}
+func TestServeWasmE2E(t *testing.T) {
+	t.Parallel()
+	test.HttpPageResult(t, test.HttpTestConfig{
+		Url:    "http://localhost:53843/e2e.wasm",
+		IsHtml: false,
 	})
 }

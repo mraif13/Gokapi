@@ -18,6 +18,7 @@ const prefixFile = "file:id:"
 const prefixHotlink = "hotlink:id:"
 const prefixSessions = "session:id:"
 const idLastUploadConfig = "default:lastupload"
+const idEnd2EndInfo = "e2e:info"
 
 const maxKeySize = 96
 
@@ -69,14 +70,7 @@ func GetAllMetadata() map[string]models.File {
 		panic("Database not loaded!")
 	}
 	result := make(map[string]models.File)
-	var keys []string
-	err := bitcaskDb.Scan([]byte(prefixFile), func(key []byte) error {
-		fileId := strings.Replace(string(key), prefixFile, "", 1)
-		keys = append(keys, fileId)
-		return nil
-	})
-
-	helper.Check(err)
+	keys := GetAllMetaDataIds()
 
 	for _, key := range keys {
 		file, ok := GetMetaDataById(key)
@@ -86,6 +80,21 @@ func GetAllMetadata() map[string]models.File {
 	}
 
 	return result
+}
+
+// GetAllMetaDataIds returns all Ids that contain metadata
+func GetAllMetaDataIds() []string {
+	if bitcaskDb == nil {
+		panic("Database not loaded!")
+	}
+	var keys []string
+	err := bitcaskDb.Scan([]byte(prefixFile), func(key []byte) error {
+		fileId := strings.Replace(string(key), prefixFile, "", 1)
+		keys = append(keys, fileId)
+		return nil
+	})
+	helper.Check(err)
+	return keys
 }
 
 // GetMetaDataById returns a models.File,true from the ID passed or false if the id is not valid
@@ -132,7 +141,14 @@ func GetHotlink(id string) (string, bool) {
 
 // SaveHotlink stores the hotlink associated with the file in the bitcaskDb
 func SaveHotlink(file models.File) {
-	err := bitcaskDb.PutWithTTL([]byte(prefixHotlink+file.HotlinkId), []byte(file.Id), expiryToDuration(file))
+	var err error
+
+	if file.UnlimitedTime {
+		err = bitcaskDb.Put([]byte(prefixHotlink+file.HotlinkId), []byte(file.Id))
+	} else {
+		err = bitcaskDb.PutWithTTL([]byte(prefixHotlink+file.HotlinkId), []byte(file.Id), expiryToDuration(file))
+	}
+
 	helper.Check(err)
 	err = bitcaskDb.Sync()
 	helper.Check(err)
@@ -274,6 +290,40 @@ func SaveUploadDefaults(values models.LastUploadValues) {
 	helper.Check(err)
 }
 
+// ## End2End Encryption ##
+
+// SaveEnd2EndInfo stores the encrypted e2e info
+func SaveEnd2EndInfo(info models.E2EInfoEncrypted) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	err := enc.Encode(info)
+	helper.Check(err)
+	err = bitcaskDb.Put([]byte(idEnd2EndInfo), buf.Bytes())
+	helper.Check(err)
+	err = bitcaskDb.Sync()
+	helper.Check(err)
+}
+
+// GetEnd2EndInfo retrieves the encrypted e2e info
+func GetEnd2EndInfo() models.E2EInfoEncrypted {
+	result := models.E2EInfoEncrypted{}
+	value, ok := getValue(idEnd2EndInfo)
+	if !ok {
+		return result
+	}
+	buf := bytes.NewBuffer(value)
+	dec := gob.NewDecoder(buf)
+	err := dec.Decode(&result)
+	helper.Check(err)
+	result.AvailableFiles = GetAllMetaDataIds()
+	return result
+}
+
+// DeleteEnd2EndInfo resets the encrypted e2e info
+func DeleteEnd2EndInfo() {
+	deleteKey(idEnd2EndInfo)
+}
+
 // RunGarbageCollection runs the databases GC
 func RunGarbageCollection() {
 	err := bitcaskDb.RunGC()
@@ -310,6 +360,11 @@ func getValue(id string) ([]byte, bool) {
 		return nil, false
 	}
 	panic(err)
+}
+
+// GetRawKey returns the raw value of a database key
+func GetRawKey(id string) ([]byte, bool) {
+	return getValue(id)
 }
 
 func expiryToDuration(file models.File) time.Duration {

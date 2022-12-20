@@ -9,6 +9,7 @@ import (
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/cloudconfig"
 	"github.com/forceu/gokapi/internal/configuration/configupgrade"
+	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/encryption"
 	"github.com/forceu/gokapi/internal/environment"
 	"github.com/forceu/gokapi/internal/helper"
@@ -22,27 +23,37 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
 // webserverDir is the embedded version of the "static" folder
 // This contains JS files, CSS, images etc for the setup
+//
 //go:embed static
 var webserverDirEmb embed.FS
 
 // templateFolderEmbedded is the embedded version of the "templates" folder
 // This contains templates that Gokapi uses for creating the HTML output
+//
 //go:embed templates
 var templateFolderEmbedded embed.FS
+
+// protectedUrls contains a list of URLs that need to be protected if authentication is disabled.
+// This list will be displayed during the setup
+var protectedUrls = []string{"/admin", "/apiDelete", "/apiKeys", "/apiNew", "/delete", "/e2eInfo", "/e2eSetup", "/uploadChunk", "/uploadComplete"}
 
 var srv http.Server
 var isInitialSetup = true
 var username string
 var password string
 
-var serverStarted = false
+// statusChannel is only used for testing to indicate to the unit test that the server has been started or shut down.
+var statusChannel chan bool = nil
 
 const debugDisableAuth = false
 
@@ -111,16 +122,46 @@ func startSetupWebserver() {
 		Handler:      mux,
 	}
 	fmt.Println("Please open http://" + resolveHostIp() + ":" + port + "/setup to setup Gokapi.")
-	go func() {
-		time.Sleep(time.Second)
-		serverStarted = true
-	}()
-	// always returns error. ErrServerClosed on graceful close
-	err := srv.ListenAndServe()
+	listener, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		if isErrorAddressAlreadyInUse(err) {
+			fmt.Println("This port is already in use. Use parameter -p or env variable GOKAPI_PORT to change the port.")
+		}
+		log.Fatalf("Setup Webserver: %v", err)
+	}
+	if statusChannel != nil {
+		go func() {
+			// Normally only one second should be enough, however slow Github action runners require more time
+			time.Sleep(5 * time.Second)
+			statusChannel <- true
+		}()
+	}
+	err = srv.Serve(listener)
 	if err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Setup Webserver: %v", err)
 	}
-	serverStarted = false
+	if statusChannel != nil {
+		statusChannel <- false
+	}
+}
+
+func isErrorAddressAlreadyInUse(err error) bool {
+	var eOsSyscall *os.SyscallError
+	if !errors.As(err, &eOsSyscall) {
+		return false
+	}
+	var errErrno syscall.Errno
+	if !errors.As(eOsSyscall, &errErrno) {
+		return false
+	}
+	if errErrno == syscall.EADDRINUSE {
+		return true
+	}
+	const WSAEADDRINUSE = 10048
+	if runtime.GOOS == "windows" && errErrno == WSAEADDRINUSE {
+		return true
+	}
+	return false
 }
 
 func resolveHostIp() string {
@@ -381,16 +422,47 @@ func getCloudConfig(formObjects *[]jsonFormObject) (*cloudconfig.CloudConfig, er
 	return &awsConfig, nil
 }
 
+func encryptionHasChanged(encLevel int, formObjects *[]jsonFormObject) (bool, error) {
+	if encLevel != configuration.Get().Encryption.Level {
+		return true, nil
+	}
+	if encLevel == encryption.LocalEncryptionInput || encLevel == encryption.FullEncryptionInput {
+		masterPw, err := getFormValueString(formObjects, "enc_pw")
+		if err != nil {
+			return true, err
+		}
+		return masterPw != "unc", nil
+	}
+	return false, nil
+}
+
 func parseEncryptionAndDelete(result *models.Configuration, formObjects *[]jsonFormObject) error {
 	encLevel, err := parseEncryptionLevel(formObjects)
 	if err != nil {
 		return err
 	}
+
+	generateNewEncConfig := true
+
 	if !isInitialSetup {
-		previousLevel := configuration.Get().Encryption.Level
-		if previousLevel != encLevel {
-			storage.DeleteAllEncrypted()
+		generateNewEncConfig, err = encryptionHasChanged(encLevel, formObjects)
+		if err != nil {
+			return err
 		}
+		if encLevel == encryption.EndToEndEncryption {
+			deleteE2eInfo, _ := getFormValueString(formObjects, "cleare2e")
+			if deleteE2eInfo == "true" {
+				database.DeleteEnd2EndInfo()
+			}
+		}
+	}
+
+	if !generateNewEncConfig {
+		result.Encryption = configuration.Get().Encryption
+		return nil
+	}
+	if !isInitialSetup {
+		storage.DeleteAllEncrypted()
 	}
 
 	result.Encryption = models.Encryption{}
@@ -409,24 +481,14 @@ func parseEncryptionAndDelete(result *models.Configuration, formObjects *[]jsonF
 	if encLevel == encryption.LocalEncryptionInput || encLevel == encryption.FullEncryptionInput {
 		result.Encryption.Salt = helper.GenerateRandomString(30)
 		result.Encryption.ChecksumSalt = helper.GenerateRandomString(30)
-		if !isPwLongEnough(masterPw) {
-			return errors.New("password is less than 6 characters long")
-		}
-		if !isInitialSetup && masterPw != "unc" {
-			storage.DeleteAllEncrypted()
+		const minLength = 8
+		if len(masterPw) < minLength {
+			return errors.New("password is less than " + strconv.Itoa(minLength) + " characters long")
 		}
 		result.Encryption.Checksum = encryption.PasswordChecksum(masterPw, result.Encryption.ChecksumSalt)
 	}
 	result.Encryption.Level = encLevel
 	return nil
-}
-
-func isPwLongEnough(pw string) bool {
-	const minLength = 6
-	if isInitialSetup || pw != "unc" {
-		return len(pw) >= minLength
-	}
-	return true
 }
 
 func parseEncryptionLevel(formObjects *[]jsonFormObject) (int, error) {
@@ -440,10 +502,6 @@ func parseEncryptionLevel(formObjects *[]jsonFormObject) (int, error) {
 	}
 	if encLevel < encryption.NoEncryption || encLevel > encryption.EndToEndEncryption {
 		return 0, errors.New("invalid encryption level selected")
-	}
-
-	if encLevel == encryption.EndToEndEncryption {
-		return 0, errors.New("end to end encryption not implemented yet") // TODO
 	}
 	return encLevel, nil
 }
@@ -471,23 +529,24 @@ func splitAndTrim(input string) []string {
 }
 
 type setupView struct {
-	IsInitialSetup  bool
-	LocalhostOnly   bool
-	HasAwsFeature   bool
-	IsDocker        bool
-	Port            int
-	OAuthUsers      string
-	HeaderUsers     string
-	Auth            models.AuthenticationConfig
-	Settings        models.Configuration
-	CloudSettings   cloudconfig.CloudConfig
-	EncryptionLevel int
+	IsInitialSetup bool
+	LocalhostOnly  bool
+	HasAwsFeature  bool
+	IsDocker       bool
+	Port           int
+	OAuthUsers     string
+	HeaderUsers    string
+	Auth           models.AuthenticationConfig
+	Settings       models.Configuration
+	CloudSettings  cloudconfig.CloudConfig
+	ProtectedUrls  []string
 }
 
 func (v *setupView) loadFromConfig() {
 	v.IsInitialSetup = isInitialSetup
 	v.IsDocker = environment.IsDockerInstance()
 	v.HasAwsFeature = aws.IsIncludedInBuild
+	v.ProtectedUrls = protectedUrls
 	if isInitialSetup {
 		return
 	}
@@ -498,7 +557,6 @@ func (v *setupView) loadFromConfig() {
 	v.CloudSettings, _ = cloudconfig.Load()
 	v.OAuthUsers = strings.Join(settings.Authentication.OauthUsers, ";")
 	v.HeaderUsers = strings.Join(settings.Authentication.HeaderUsers, ";")
-	v.EncryptionLevel = settings.Encryption.Level
 
 	if strings.Contains(settings.Port, "localhost") || strings.Contains(settings.Port, "127.0.0.1") {
 		v.LocalhostOnly = true

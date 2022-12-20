@@ -14,6 +14,7 @@ import (
 	"golang.org/x/crypto/scrypt"
 	"io"
 	"log"
+	"os"
 	"time"
 )
 
@@ -54,7 +55,7 @@ func Init(config models.Configuration) {
 	case FullEncryptionInput:
 		initWithPassword(config.Encryption.Salt, config.Encryption.Checksum, config.Encryption.ChecksumSalt)
 	case EndToEndEncryption:
-		// TODO
+		return
 	}
 }
 
@@ -127,14 +128,14 @@ func storeMasterKey(cipherKey []byte) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	encryptedKey, err = encryptDecryptText(cipherKey, ramCipher, make([]byte, nonceSize), true)
+	encryptedKey, err = EncryptDecryptBytes(cipherKey, ramCipher, make([]byte, nonceSize), true)
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
 func getMasterCipher() []byte {
-	key, err := encryptDecryptText(encryptedKey, ramCipher, make([]byte, nonceSize), false)
+	key, err := EncryptDecryptBytes(encryptedKey, ramCipher, make([]byte, nonceSize), false)
 	if err != nil {
 		key = []byte{}
 		log.Fatal(err)
@@ -155,17 +156,34 @@ func Encrypt(encInfo *models.EncryptionInfo, input io.Reader, output io.Writer) 
 	return err
 }
 
-// DecryptReader modifies a reader so it can decrypt encrypted files
-func DecryptReader(encInfo models.EncryptionInfo, input io.Reader, output io.Writer) error {
+func createDecryptReader(encInfo models.EncryptionInfo, input io.Reader) (*sio.DecReader, error) {
 	key, err := GetCipherFromFile(encInfo)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	stream := getStream(key)
 	nonce := make([]byte, stream.NonceSize()) // Nonce is not used
-	reader := stream.DecryptReader(input, nonce, nil)
+	return stream.DecryptReader(input, nonce, nil), nil
+}
+
+// DecryptReader modifies a reader so it can decrypt encrypted files
+func DecryptReader(encInfo models.EncryptionInfo, input io.Reader, output io.Writer) error {
+	reader, err := createDecryptReader(encInfo, input)
+	if err != nil {
+		return err
+	}
 	_, err = io.Copy(output, reader)
 	return err
+}
+
+// IsCorrectKey checks if correct key is being used. This does not check for complete file authentication.
+func IsCorrectKey(encInfo models.EncryptionInfo, input *os.File) bool {
+	_, err := createDecryptReader(encInfo, input)
+	if err != nil {
+		fmt.Println(err)
+		return false
+	}
+	return true
 }
 
 // GetDecryptWriter returns a writer that can decrypt encrypted files
@@ -189,6 +207,14 @@ func GetEncryptReader(cipherKey []byte, input io.Reader) (io.Reader, error) {
 	return stream.EncryptReader(input, nonce, nil), nil
 }
 
+// GetEncryptWriter returns a writer that can encrypt plain files
+func GetEncryptWriter(cipherKey []byte, input io.Writer) (*sio.EncWriter, error) {
+	stream := getStream(cipherKey)
+	nonce := make([]byte, stream.NonceSize()) // Nonce is not used
+	return stream.EncryptWriter(input, nonce, nil), nil
+
+}
+
 func generateNewFileKey(encInfo *models.EncryptionInfo) ([]byte, error) {
 	encryptionKey, err := getRandomData(blockSize)
 	if err != nil {
@@ -206,6 +232,11 @@ func generateNewFileKey(encInfo *models.EncryptionInfo) ([]byte, error) {
 	}
 	encInfo.DecryptionKey = encKey
 	return encryptionKey, nil
+}
+
+// CalculateEncryptedFilesize returns the filesize of the encrypted file including the encryption overhead
+func CalculateEncryptedFilesize(size int64) int64 {
+	return size + getStream(make([]byte, blockSize)).Overhead(size)
 }
 
 // GetCipherFromFile loads the cipher from a file model
@@ -234,13 +265,14 @@ func getStream(cipherKey []byte) *sio.Stream {
 }
 
 func fileCipherEncrypt(input, nonce []byte) ([]byte, error) {
-	return encryptDecryptText(input, getMasterCipher(), nonce, true)
+	return EncryptDecryptBytes(input, getMasterCipher(), nonce, true)
 }
 func fileCipherDecrypt(input, nonce []byte) ([]byte, error) {
-	return encryptDecryptText(input, getMasterCipher(), nonce, false)
+	return EncryptDecryptBytes(input, getMasterCipher(), nonce, false)
 }
 
-func encryptDecryptText(input, cipherBlock, nonce []byte, doEncrypt bool) ([]byte, error) {
+// EncryptDecryptBytes encrypts or decrypts a byte array
+func EncryptDecryptBytes(input, cipherBlock, nonce []byte, doEncrypt bool) ([]byte, error) {
 	block, err := aes.NewCipher(cipherBlock)
 	if err != nil {
 		return []byte{}, err

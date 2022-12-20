@@ -108,7 +108,12 @@
 					<div class="form-group">
 							<div class="col-sm-8">
 							  <label for="port">Port:</label>
-								<input type="number" class="form-control" id="port" name="port" value="53842" min="1" max="65535" placeholder="Port number" data-min="1" data-validate="validateMinLength" required onChange="urlParamChanged()">
+{{ if .IsDocker }}
+							<input type="number" class="form-control" id="port" value="53842" placeholder="Port number" disabled>
+							<input type="hidden" class="form-control" name="port" value="53842">
+{{ else }}
+							<input type="number" class="form-control" id="port" name="port" value="53842" min="1" max="65535" placeholder="Port number" data-min="1" data-validate="validateMinLength" required onChange="urlParamChanged()">
+{{ end }}
 							</div><br><br><br>
 							
 
@@ -260,12 +265,9 @@
 						<span style="color:#FF0000;">Warning:</span> This setting will disable authentication completely! You will need to secure the following URLs with your reverse proxy:
 						
 						<ul>
-						  <li>/admin</li>
-						  <li>/apiDelete</li>
-						  <li>/apiKeys</li>
-						  <li>/apiNew</li>
-						  <li>/delete</li>
-						  <li>/upload</li>
+{{ range .ProtectedUrls }}
+						  <li>{{ . }}</li>
+{{ end }}
 						</ul>
 
 						Only proceed if you know what you are doing!
@@ -399,15 +401,16 @@ function TestAWS(button) {
 							<option value="2" >Level 1 - Local encryption / Key on startup</option>
 							<option value="3" >Level 2 - Full encryption / Key locally</option>
 							<option value="4" >Level 2 - Full encryption / Key on startup</option>
-							<!-- <option value="5" disabled>Level 3 - End-To-End encryption (not implemented yet)</option> -->
+							<option value="5" >Level 3 - End-To-End encryption</option>
 					</select>
+					
 					
 					<div id="encinfo0">
 					<p><br><br><b>Level 0 - No encryption</b>
 					<ul>
 					  <li>All files are stored in plain text on the local or remote server</li>
 					  <li>Uses the least ressources</li>
-					  <li>Supports hotlinks to images</li>
+					  <li>Supports hotlinks to files</li>
 					  <li>Supports download progress bar</li>
 					  <li>Gokapi starts without user input</li>
 					</ul></p>
@@ -418,10 +421,11 @@ function TestAWS(button) {
 					<ul>
 					  <li>Local files are encrypted, remote files (S3) are stored in plain text</li>
 					  <li>Decryption is done server-side</li>
-					  <li>Supports hotlinks to images</li>
+					  <li>Supports hotlinks to files</li>
 					  <li>Does not support download progress bar</li>
 					  <li>Gokapi starts without user input</li>
 					  <li><b>Warning:</b> Password can be read with access to Gokapi configuration</li>
+					  <li><b>Warning:</b> During upload temporary files containing the plaintext content may be created.</li>
 					  <li><b>Warning:</b> Encryption has not been audited.</li>
 					</ul></p>
 					</div>
@@ -431,10 +435,11 @@ function TestAWS(button) {
 					<ul>
 					  <li>Local files are encrypted, remote files (S3) are stored in plain text</li>
 					  <li>Decryption is done server-side</li>
-					  <li>Supports hotlinks to images</li>
+					  <li>Supports hotlinks to files</li>
 					  <li>Does not support download progress bar</li>
 					  <li>Password cannot be read with access to Gokapi configuration</li>
-					  <li><b>Warning:</b> Gokapi requires user input to start</li>
+					  <li><span style="color:red"><b>Warning:</b></span> Gokapi requires user input to start</li>
+					  <li><b>Warning:</b> During upload temporary files containing the plaintext content may be created.</li>
 					  <li><b>Warning:</b> Encryption has not been audited.</li>
 					</ul></p>
 					</div>
@@ -445,11 +450,13 @@ function TestAWS(button) {
 					  <li>All files are encrypted</li>
 					  <li>Decryption for local files is done server-side</li>
 					  <li>Decryption for remote files (S3) is done client-side, requires 2MB file to load on first visit</li>
-					  <li>Only supports hotlinks to images saved locally</li>
+					  <li>Only supports hotlinks to files saved locally</li>
 					  <li>Does not support download progress bar</li>
 					  <li>Gokapi starts without user input</li>
 					  <li><b>Important:</b> For remote storage, CORS settings for the bucket need to allow access from the Gokapi URL</li>
+					  <li><b>Warning:</b> Download might be significantly slower</li>
 					  <li><b>Warning:</b> Password can be read with access to Gokapi configuration</li>
+					  <li><b>Warning:</b> During upload temporary files containing the plaintext content may be created.</li>
 					  <li><b>Warning:</b> Encryption has not been audited.</li>
 					</ul></p>
 					</div>
@@ -460,27 +467,41 @@ function TestAWS(button) {
 					  <li>All files are encrypted</li>
 					  <li>Decryption for local files is done server-side</li>
 					  <li>Decryption for remote files (S3) is done client-side, requires 2MB file to load on first visit</li>
-					  <li>Only supports hotlinks to images saved locally</li>
+					  <li>Only supports hotlinks to files saved locally</li>
 					  <li>Does not support download progress bar</li>
 					  <li>Password cannot be read with access to Gokapi configuration</li>
 					  <li><b>Important:</b> For remote storage, CORS settings for the bucket need to allow access from the Gokapi URL</li>
-					  <li><b>Warning:</b> Gokapi requires user input to start</li>
+					  <li><span style="color:red"><b>Warning:</b></span> Gokapi requires user input to start</li>
+					  <li><b>Warning:</b> Download might be significantly slower</li>
+					  <li><b>Warning:</b> During upload temporary files containing the plaintext content may be created.</li>
 					  <li><b>Warning:</b> Encryption has not been audited.</li>
 					</ul></p>
 					</div>
 					
 					
 					<div id="encinfo5">
-					<p><br><br><b>Level 3 - NOT IMPLEMENTED YET</b>
+					<p><br><br><b>Level 3 - End-To-End encryption</b>
 					<ul>
 					  <li>All files are encrypted end-to-end</li>
 					  <li>Encryption and decryption is done client-side and requires 2MB file to load on first visit</li>
-					  <li>Does not support hotlinks to images</li>
+					  <li>Does not support deduplication</li>
+					  <li>Does not support hotlinks to files</li>
 					  <li>Does not support download progress bar</li>
 					  <li>Gokapi starts without user input</li>
+					  <li>Files uploaded through the API have to be unencrypted</li>
 					  <li>Password cannot be read with access to Gokapi configuration</li>
+					  <li><b>Warning:</b> Download and upload might be significantly slower</li>
+					  <li><b>Warning:</b> Encryption keys are stored in plain-text on this machine</li>
 					  <li><b>Warning:</b> Encryption has not been audited.</li>
 					</ul></p>
+							
+{{ if not .IsInitialSetup }}
+				     <div id="e2eclear"><br>
+				     <input name="cleare2e" type="checkbox" value="true"/>
+				     <span>&nbsp;Reset end-to-end password (you will lose access to already encrypted files)</span>
+				     </div>
+
+{{ end }}
 					</div>
 
 				</div>
@@ -546,8 +567,9 @@ function TestAWS(button) {
 	
 				<div class="wizard-success">
 					<div class="alert alert-success">
-						<span class="create-server-name"></span>Gokapi has been set up <strong>successfully.</strong>
+						<span class="create-server-name"></span>Gokapi has been set up <strong>successfully</strong>.
 					</div>
+					If you configured Gokapi to use a password during startup, please enter it now in the console before clicking on continue.<br><br>
 	
 					<a class="btn btn-success im-done">Continue</a>
 				</div>
@@ -720,7 +742,8 @@ function TestAWS(button) {
 			function validatePassword2(el) {
 				let value = el.val();
 {{ if not .IsInitialSetup }}
-				if (value == "unc")
+				let previousEncLevel = {{ .Settings.Encryption.Level}};
+				if (value == "unc" && previousEncLevel == document.getElementById("encrypt_sel").value)
 					return true;
 {{end}}
 				let minLenghtStatus = validateMinLength(el);
@@ -753,8 +776,8 @@ function TestAWS(button) {
 {{ if .IsInitialSetup }}			
 				encryptionSelectionChanged(0, true);
 {{ else }}
-				document.getElementById("encrypt_sel").value={{.EncryptionLevel}};
-				encryptionSelectionChanged({{.EncryptionLevel}}, true);
+				document.getElementById("encrypt_sel").value={{.Settings.Encryption.Level}};
+				encryptionSelectionChanged({{.Settings.Encryption.Level}}, true);
 {{ end }}
 			});
 			

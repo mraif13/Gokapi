@@ -8,6 +8,8 @@ import (
 	"context"
 	"embed"
 	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/NYTimes/gziphandler"
 	"github.com/forceu/gokapi/internal/configuration"
@@ -34,23 +36,32 @@ import (
 )
 
 // TODO add 404 handler
-
 // staticFolderEmbedded is the embedded version of the "static" folder
 // This contains JS files, CSS, images etc
+//
 //go:embed web/static
 var staticFolderEmbedded embed.FS
 
 // templateFolderEmbedded is the embedded version of the "templates" folder
 // This contains templates that Gokapi uses for creating the HTML output
+//
 //go:embed web/templates
 var templateFolderEmbedded embed.FS
 
-// wasmFile is the compiled binary of the wasm downloader
+// wasmDownloadFile is the compiled binary of the wasm downloader
 // Will be generated with go generate ./...
+//
 //go:embed web/main.wasm
-var wasmFile embed.FS
+var wasmDownloadFile embed.FS
 
-const timeOutWebserver = 12 * time.Hour
+// wasmE2EFile is the compiled binary of the wasm e2e encrypter
+// Will be generated with go generate ./...
+//
+//go:embed web/e2e.wasm
+var wasmE2EFile embed.FS
+
+const timeOutWebserverRead = 12 * time.Hour
+const timeOutWebserverWrite = 12 * time.Hour
 
 // Variable containing all parsed templates
 var templateFolder *template.Template
@@ -87,15 +98,19 @@ func Start() {
 	mux.HandleFunc("/d", showDownload)
 	mux.HandleFunc("/delete", requireLogin(deleteFile, false))
 	mux.HandleFunc("/downloadFile", downloadFile)
+	mux.HandleFunc("/e2eInfo", requireLogin(e2eInfo, true))
+	mux.HandleFunc("/e2eSetup", requireLogin(showE2ESetup, false))
 	mux.HandleFunc("/error", showError)
 	mux.HandleFunc("/forgotpw", forgotPassword)
 	mux.HandleFunc("/hotlink/", showHotlink)
 	mux.HandleFunc("/index", showIndex)
 	mux.HandleFunc("/login", showLogin)
 	mux.HandleFunc("/logout", doLogout)
-	mux.HandleFunc("/upload", requireLogin(uploadFile, true))
+	mux.HandleFunc("/uploadChunk", requireLogin(uploadChunk, true))
+	mux.HandleFunc("/uploadComplete", requireLogin(uploadComplete, true))
 	mux.HandleFunc("/error-auth", showErrorAuth)
-	mux.Handle("/main.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveWasm)))
+	mux.Handle("/main.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveDownloadWasm)))
+	mux.Handle("/e2e.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveE2EWasm)))
 	if configuration.Get().Authentication.Method == authentication.OAuth2 {
 		oauth.Init(configuration.Get().ServerUrl, configuration.Get().Authentication)
 		mux.HandleFunc("/oauth-login", oauth.HandlerLogin)
@@ -105,8 +120,8 @@ func Start() {
 	fmt.Println("Binding webserver to " + configuration.Get().Port)
 	srv = http.Server{
 		Addr:         configuration.Get().Port,
-		ReadTimeout:  timeOutWebserver,
-		WriteTimeout: timeOutWebserver,
+		ReadTimeout:  timeOutWebserverRead,
+		WriteTimeout: timeOutWebserverWrite,
 		Handler:      mux,
 	}
 	infoMessage := "Webserver can be accessed at " + configuration.Get().ServerUrl + "admin\nPress CTRL+C to stop Gokapi"
@@ -162,10 +177,19 @@ func redirect(w http.ResponseWriter, url string) {
 }
 
 // Handling of /main.wasm
-func serveWasm(w http.ResponseWriter, r *http.Request) {
+func serveDownloadWasm(w http.ResponseWriter, r *http.Request) {
 	w.Header().Add("Cache-Control", "public, max-age=100800") // 2 days
 	w.Header().Set("content-type", "application/wasm")
-	file, err := wasmFile.ReadFile("web/main.wasm")
+	file, err := wasmDownloadFile.ReadFile("web/main.wasm")
+	helper.Check(err)
+	w.Write(file)
+}
+
+// Handling of /e2e.wasm
+func serveE2EWasm(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Cache-Control", "public, max-age=100800") // 2 days
+	w.Header().Set("content-type", "application/wasm")
+	file, err := wasmE2EFile.ReadFile("web/e2e.wasm")
 	helper.Check(err)
 	w.Write(file)
 }
@@ -183,7 +207,18 @@ func showIndex(w http.ResponseWriter, r *http.Request) {
 
 // Handling of /error
 func showError(w http.ResponseWriter, r *http.Request) {
-	err := templateFolder.ExecuteTemplate(w, "error", genericView{})
+	const invalidFile = 0
+	const noCipherSupplied = 1
+	const wrongCipher = 2
+
+	errorReason := invalidFile
+	if r.URL.Query().Has("e2e") {
+		errorReason = noCipherSupplied
+	}
+	if r.URL.Query().Has("key") {
+		errorReason = wrongCipher
+	}
+	err := templateFolder.ExecuteTemplate(w, "error", genericView{ErrorId: errorReason})
 	helper.Check(err)
 }
 
@@ -249,7 +284,9 @@ func showLogin(w http.ResponseWriter, r *http.Request) {
 			redirect(w, "admin")
 			return
 		}
-		time.Sleep(3 * time.Second)
+		select {
+		case <-time.After(3 * time.Second):
+		}
 		failedLogin = true
 	}
 	err = templateFolder.ExecuteTemplate(w, "login", LoginView{
@@ -280,27 +317,32 @@ func showDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	view := DownloadView{
-		Name:          file.Name,
-		Size:          file.Size,
-		Id:            file.Id,
-		IsFailedLogin: false,
-		UsesHttps:     configuration.UsesHttps(),
+		Name:               file.Name,
+		Size:               file.Size,
+		Id:                 file.Id,
+		EndToEndEncryption: file.Encryption.IsEndToEndEncrypted,
+		IsFailedLogin:      false,
+		UsesHttps:          configuration.UsesHttps(),
 	}
 
 	if storage.RequiresClientDecryption(file) {
 		view.ClientSideDecryption = true
-		cipher, err := encryption.GetCipherFromFile(file.Encryption)
-		helper.Check(err)
-		view.Cipher = base64.StdEncoding.EncodeToString(cipher)
+		if !file.Encryption.IsEndToEndEncrypted {
+			cipher, err := encryption.GetCipherFromFile(file.Encryption)
+			helper.Check(err)
+			view.Cipher = base64.StdEncoding.EncodeToString(cipher)
+		}
 	}
 
 	if file.PasswordHash != "" {
-		r.ParseForm()
+		_ = r.ParseForm()
 		enteredPassword := r.Form.Get("password")
 		if configuration.HashPassword(enteredPassword, true) != file.PasswordHash && !isValidPwCookie(r, file) {
 			if enteredPassword != "" {
 				view.IsFailedLogin = true
-				time.Sleep(1 * time.Second)
+				select {
+				case <-time.After(1 * time.Second):
+				}
 			}
 			err := templateFolder.ExecuteTemplate(w, "download_password", view)
 			helper.Check(err)
@@ -324,12 +366,63 @@ func showHotlink(w http.ResponseWriter, r *http.Request) {
 	hotlinkId := strings.Replace(r.URL.Path, "/hotlink/", "", 1)
 	file, ok := storage.GetFileByHotlink(hotlinkId)
 	if !ok {
-		w.Header().Set("Content-Type", r.Header.Get("Content-Type"))
+		w.Header().Set("Content-Type", "image/png")
 		_, err := w.Write(imageExpiredPicture)
 		helper.Check(err)
 		return
 	}
 	storage.ServeFile(file, w, r, false)
+}
+
+// Handling of /e2eInfo
+// User needs to be admin. Receives or stores end2end encryption info
+func e2eInfo(w http.ResponseWriter, r *http.Request) {
+	action, ok := r.URL.Query()["action"]
+	if !ok || len(action) < 1 {
+		responseError(w, errors.New("invalid action specified"))
+		return
+	}
+	switch action[0] {
+	case "get":
+		getE2eInfo(w)
+	case "store":
+		storeE2eInfo(w, r)
+	default:
+		responseError(w, errors.New("invalid action specified"))
+	}
+}
+
+func storeE2eInfo(w http.ResponseWriter, r *http.Request) {
+	err := r.ParseForm()
+	if err != nil {
+		responseError(w, err)
+		return
+	}
+	uploadedInfoBase64 := r.Form.Get("info")
+	if uploadedInfoBase64 == "" {
+		responseError(w, errors.New("empty info sent"))
+		return
+	}
+	uploadedInfo, err := base64.StdEncoding.DecodeString(uploadedInfoBase64)
+	if err != nil {
+		responseError(w, err)
+		return
+	}
+	var info models.E2EInfoEncrypted
+	err = json.Unmarshal(uploadedInfo, &info)
+	if err != nil {
+		responseError(w, err)
+		return
+	}
+	database.SaveEnd2EndInfo(info)
+	_, _ = w.Write([]byte("\"result\":\"OK\""))
+}
+
+func getE2eInfo(w http.ResponseWriter) {
+	info := database.GetEnd2EndInfo()
+	bytes, err := json.Marshal(info)
+	helper.Check(err)
+	_, _ = w.Write(bytes)
 }
 
 // Handling of /delete
@@ -348,7 +441,9 @@ func deleteFile(w http.ResponseWriter, r *http.Request) {
 func queryUrl(w http.ResponseWriter, r *http.Request, redirectUrl string) string {
 	keys, ok := r.URL.Query()["id"]
 	if !ok || len(keys[0]) < configuration.Get().LengthId {
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-time.After(500 * time.Millisecond):
+		}
 		redirect(w, redirectUrl)
 		return ""
 	}
@@ -358,7 +453,24 @@ func queryUrl(w http.ResponseWriter, r *http.Request, redirectUrl string) string
 // Handling of /admin
 // If user is authenticated, this menu lists all uploads and enables uploading new files
 func showAdminMenu(w http.ResponseWriter, r *http.Request) {
+	if configuration.Get().Encryption.Level == encryption.EndToEndEncryption {
+		e2einfo := database.GetEnd2EndInfo()
+		if !e2einfo.HasBeenSetUp() {
+			redirect(w, "e2eSetup")
+			return
+		}
+	}
 	err := templateFolder.ExecuteTemplate(w, "admin", (&UploadView{}).convertGlobalConfig(true))
+	helper.Check(err)
+}
+
+func showE2ESetup(w http.ResponseWriter, r *http.Request) {
+	if configuration.Get().Encryption.Level != encryption.EndToEndEncryption {
+		redirect(w, "admin")
+		return
+	}
+	e2einfo := database.GetEnd2EndInfo()
+	err := templateFolder.ExecuteTemplate(w, "e2esetup", e2ESetupView{HasBeenSetup: e2einfo.HasBeenSetUp()})
 	helper.Check(err)
 }
 
@@ -370,16 +482,23 @@ type DownloadView struct {
 	IsFailedLogin        bool
 	IsAdminView          bool
 	ClientSideDecryption bool
+	EndToEndEncryption   bool
 	UsesHttps            bool
 	Cipher               string
 }
 
+type e2ESetupView struct {
+	IsAdminView  bool
+	HasBeenSetup bool
+}
+
 // UploadView contains parameters for the admin menu template
 type UploadView struct {
-	Items                    []models.File
+	Items                    []models.FileApiOutput
 	ApiKeys                  []models.ApiKey
 	Url                      string
 	HotlinkUrl               string
+	GenericHotlinkUrl        string
 	TimeNow                  int64
 	IsAdminView              bool
 	IsMainView               bool
@@ -391,16 +510,19 @@ type UploadView struct {
 	DefaultPassword          string
 	DefaultUnlimitedDownload bool
 	DefaultUnlimitedTime     bool
+	EndToEndEncryption       bool
 }
 
 // Converts the globalConfig variable to an UploadView struct to pass the infos to
 // the admin template
 func (u *UploadView) convertGlobalConfig(isMainView bool) *UploadView {
-	var result []models.File
+	var result []models.FileApiOutput
 	var resultApi []models.ApiKey
 	if isMainView {
 		for _, element := range database.GetAllMetadata() {
-			result = append(result, element)
+			fileInfo, err := element.ToFileApiOutput(storage.RequiresClientDecryption(element))
+			helper.Check(err)
+			result = append(result, fileInfo)
 		}
 		sort.Slice(result[:], func(i, j int) bool {
 			if result[i].ExpireAt == result[j].ExpireAt {
@@ -426,6 +548,7 @@ func (u *UploadView) convertGlobalConfig(isMainView bool) *UploadView {
 	}
 	u.Url = configuration.Get().ServerUrl + "d?id="
 	u.HotlinkUrl = configuration.Get().ServerUrl + "hotlink/"
+	u.GenericHotlinkUrl = configuration.Get().ServerUrl + "downloadFile?id="
 	u.Items = result
 	u.ApiKeys = resultApi
 	u.TimeNow = time.Now().Unix()
@@ -439,23 +562,32 @@ func (u *UploadView) convertGlobalConfig(isMainView bool) *UploadView {
 	u.DefaultPassword = defaultValues.Password
 	u.DefaultUnlimitedDownload = defaultValues.UnlimitedDownload
 	u.DefaultUnlimitedTime = defaultValues.UnlimitedTime
+	u.EndToEndEncryption = configuration.Get().Encryption.Level == encryption.EndToEndEncryption
 	return u
 }
 
-// Handling of /upload
-// If the user is authenticated, this parses the uploaded file from the Multipart Form and
-// adds it to the system.
-func uploadFile(w http.ResponseWriter, r *http.Request) {
+// Handling of /uploadChunk
+// If the user is authenticated, this parses the uploaded chunk and stores it
+func uploadChunk(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-	err := fileupload.Process(w, r, true, configuration.Get().MaxMemory)
+	err := fileupload.ProcessNewChunk(w, r, false)
+	responseError(w, err)
+}
+
+// Handling of /uploadComplete
+// If the user is authenticated, this parses the uploaded chunk and stores it
+func uploadComplete(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	err := fileupload.CompleteChunk(w, r, false)
 	responseError(w, err)
 }
 
 // Outputs an error in json format
 func responseError(w http.ResponseWriter, err error) {
 	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, "{\"Result\":\"error\",\"ErrorMessage\":\""+err.Error()+"\"}")
-		helper.Check(err)
+		log.Println(err)
 	}
 }
 
@@ -503,14 +635,16 @@ func writeFilePwCookie(w http.ResponseWriter, file models.File) {
 }
 
 // Checks if a cookie contains the correct password hash for a password-protected file
-// If incorrect, a 3 second delay is introduced unless the cookie was empty.
+// If incorrect, a 3-second delay is introduced unless the cookie was empty.
 func isValidPwCookie(r *http.Request, file models.File) bool {
 	cookie, err := r.Cookie("p" + file.Id)
 	if err == nil {
 		if cookie.Value == file.PasswordHash {
 			return true
 		}
-		time.Sleep(3 * time.Second)
+		select {
+		case <-time.After(3 * time.Second):
+		}
 	}
 	return false
 }
@@ -524,4 +658,5 @@ func addNoCacheHeader(w http.ResponseWriter) {
 type genericView struct {
 	IsAdminView bool
 	RedirectUrl string
+	ErrorId     int
 }

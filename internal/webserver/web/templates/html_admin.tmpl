@@ -7,11 +7,10 @@
 		  <div class="card-body">
 		    <h3 class="card-title">Upload</h3>
 		    <br>
-		    <p class="card-text"><form action="./upload"
+		    <p class="card-text"><form action="./uploadChunk"
 			      class="dropzone"
 			      id="uploaddropzone"></form>			
-		</p><br>
-
+		<p></p><br>
 		<div class="container-md">
 		  <div class="row">
 			  <div class="form-group col">
@@ -37,11 +36,14 @@
 	     			<label class="control-label  small" for="password">Password</label>
 				<input class="form-control admin-input" value="{{ .DefaultPassword }}" name="password" id="password" placeholder="None" {{ if eq .DefaultPassword "" }} disabled {{ end }}/>
 			  </div>
+<div id="errordiv" class="alert alert-danger" style="display:none">
+  <span id="errormessage" ></span>
+</div>
 		  </div>
 		</div>
 		<br><br>
 		<div class="table-responsive">
-			<table class="table table-dark">
+			<table id="maintable" class="table table-dark">
 				<thead>
 					<tr>
 						<th scope="col">Filename</th>
@@ -49,7 +51,7 @@
 						<th scope="col">Downloads remaining</th>
 						<th scope="col">Stored until</th>
 						<th scope="col">Downloads</th>
-						<th scope="col">URL</th>
+						<th scope="col">ID</th>
 						<th scope="col">Actions</th>
 					</tr>
 				</thead>
@@ -58,8 +60,8 @@
 	{{ if  or (gt .ExpireAt $.TimeNow) (.UnlimitedTime) }}
 		{{ if or (gt .DownloadsRemaining 0) (.UnlimitedDownloads) }}
 					<tr>
-						<td scope="col">{{ .Name }}</td>
-						<td scope="col">{{ .Size }}</td>
+						<td scope="col" id="cell-name-{{ .Id }}">{{ .Name }}</td>
+						<td data-order="{{ .SizeBytes }}" scope="col">{{ .Size }}</td>
 			{{ if .UnlimitedDownloads }}
 						<td scope="col">Unlimited</td>
 			{{ else }}
@@ -71,12 +73,16 @@
 						<td scope="col">{{ .ExpireAtString }}</td>
 			{{ end }}
 						<td scope="col">{{ .DownloadCount }}</td>
-						<td scope="col"><a target="_blank" href="{{ $.Url }}{{ .Id }}">{{ $.Url }}{{ .Id }}</a>{{ if ne .PasswordHash "" }} &#128274;{{ end }}</td>
-						<td scope="col"><button type="button" data-clipboard-text="{{ $.Url }}{{ .Id }}" class="copyurl btn btn-outline-light btn-sm">Copy URL</button> 
+						<td scope="col"><a id="url-href-{{ .Id }}" target="_blank" href="{{ $.Url }}{{ .Id }}">{{ .Id }}</a>{{ if .IsPasswordProtected }} &#128274;{{ end }}</td>
+						<td scope="col"><button id="url-button-{{ .Id }}" type="button" data-clipboard-text="{{ $.Url }}{{ .Id }}" class="copyurl btn btn-outline-light btn-sm">Copy URL</button> 
 			{{ if ne .HotlinkId "" }}
  						<button type="button" data-clipboard-text="{{ $.HotlinkUrl }}{{ .HotlinkId }}" class="copyurl btn btn-outline-light btn-sm">Copy Hotlink</button>
 			{{ else }}
- 						<button type="button"class="copyurl btn btn-outline-light btn-sm disabled">Copy Hotlink</button>
+				{{ if and (not .IsPasswordProtected) (not .RequiresClientSideDecryption)  }}
+	 						<button type="button" data-clipboard-text="{{ $.GenericHotlinkUrl }}{{ .Id }}" class="copyurl btn btn-outline-light btn-sm">Copy Hotlink</button>
+				{{ else }}
+ 							<button type="button"class="copyurl btn btn-outline-light btn-sm disabled">Copy Hotlink</button>
+				{{ end }}
 			{{ end }}
 						<button type="button" class="btn btn-outline-light btn-sm" onclick="window.location='./delete?id={{ .Id }}'">Delete</button></td>
 					</tr>
@@ -91,11 +97,42 @@
 	    </div>
    	 </div>
 
-	<script src="./js/admin.js?v=10"></script>
+	<script src="./js/admin.js?v=13"></script>
 	<script>
 		Dropzone.options.uploaddropzone["maxFilesize"] = {{ .MaxFileSize }};
-		Dropzone.options.uploaddropzone["dictDefaultMessage"] = "Drop files, paste or click here to upload";
+		Dropzone.options.uploaddropzone["timeout"] = 1200000;
+		Dropzone.options.uploaddropzone["chunking"] = true;
+		Dropzone.options.uploaddropzone["chunkSize"] = 10000000;
+		Dropzone.options.uploaddropzone["forceChunking"] = true;
+		Dropzone.options.uploaddropzone["retryChunks"] = true;
+		Dropzone.options.uploaddropzone["retryChunksLimit"] = 3;
+		Dropzone.options.uploaddropzone["retryChunks"] = true;
+		
+		$(document).ready(function () {
+		    $('#maintable').DataTable({
+    		    "responsive": true,
+		    "columnDefs": [ {
+			"targets": 6,
+			"orderable": false
+			} ],
+		    "paging": false,
+		    "language": {
+		      "info": "Files stored: _TOTAL_",
+		      "emptyTable": "No files stored yet",
+		      "infoEmpty": "",
+		    }
+		    });
+		});
 	</script>
+
+{{ if .EndToEndEncryption }}
+        <script src="./js/wasm_exec.js"></script>
+	<script src="./js/end2end_admin.js?v=1"></script>
+	<script>
+		checkIfE2EKeyIsSet();
+	</script>
+{{ end }}
+        
 
 
 {{ template "footer" }}
