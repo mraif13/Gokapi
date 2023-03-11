@@ -3,6 +3,16 @@ var clipboard = new ClipboardJS('.btn');
 var dropzoneObject;
 var isE2EEnabled = false;
 
+var isUploading = false;
+
+var rowCount = -1;
+
+window.addEventListener('beforeunload', (event) => {
+    if (isUploading) {
+        event.returnValue = 'Upload is still in progress. Do you want to close this page?';
+    }
+});
+
 Dropzone.options.uploaddropzone = {
     paramName: "file",
     dictDefaultMessage: "Drop files, paste or click here to upload",
@@ -12,7 +22,12 @@ Dropzone.options.uploaddropzone = {
     },
     init: function() {
         dropzoneObject = this;
-        this.on("sending", function(file, xhr, formData) {});
+        this.on("queuecomplete", function() {
+            isUploading = false;
+        });
+        this.on("sending", function(file, xhr, formData) {
+            isUploading = true;
+        });
         // This will be executed after the page has loaded. If e2e ist enabled, the end2end_admin.js has set isE2EEnabled to true
         if (isE2EEnabled) {
             dropzoneObject.disable();
@@ -214,13 +229,25 @@ function addRow(jsonText) {
 
     cellFilename.style.backgroundColor = "green"
     cellFileSize.style.backgroundColor = "green"
-    console.log(jsonObject);
     cellFileSize.setAttribute('data-order', jsonObject.FileInfo.SizeBytes);
     cellRemainingDownloads.style.backgroundColor = "green"
     cellStoredUntil.style.backgroundColor = "green"
     cellDownloadCount.style.backgroundColor = "green"
     cellUrl.style.backgroundColor = "green"
     cellButtons.style.backgroundColor = "green"
-    $('#maintable').DataTable().row.add(row);
+    let datatable = $('#maintable').DataTable();
+
+    if (rowCount == -1) {
+        rowCount = datatable.rows().count();
+    }
+    rowCount = rowCount + 1;
+    datatable.row.add(row);
+
+    let infoEmpty = document.getElementsByClassName("dataTables_empty")[0];
+    if (typeof infoEmpty !== "undefined") {
+        infoEmpty.innerText = "Files stored: " + rowCount;
+    } else {
+        document.getElementsByClassName("dataTables_info")[0].innerText = "Files stored: " + rowCount;
+    }
     return item.Id;
 }
