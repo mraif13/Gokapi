@@ -7,9 +7,11 @@ import (
 	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/models"
+	"github.com/forceu/gokapi/internal/storage/processingstatus"
 	"github.com/forceu/gokapi/internal/test"
 	"github.com/forceu/gokapi/internal/test/testconfiguration"
 	"github.com/forceu/gokapi/internal/webserver/authentication"
+	"github.com/r3labs/sse/v2"
 	"io"
 	"mime/multipart"
 	"net/http/httptest"
@@ -24,6 +26,7 @@ import (
 func TestMain(m *testing.M) {
 	testconfiguration.Create(true)
 	configuration.Load()
+	processingstatus.Init(sse.New())
 	exitVal := m.Run()
 	testconfiguration.Delete()
 	os.Exit(exitVal)
@@ -507,4 +510,11 @@ func TestList(t *testing.T) {
 	Process(w, r, maxMemory)
 	test.IsEqualInt(t, w.Code, 200)
 	test.ResponseBodyContains(t, w, "picture.jpg")
+}
+
+func TestApiRequestToUploadRequest(t *testing.T) {
+	_, r := test.GetRecorder("POST", "/api/chunk/complete", nil, []test.Header{
+		{Name: "Content-type", Value: "application/x-www-form-urlencoded"}}, strings.NewReader("invalid&&§$%"))
+	_, _, _, err := apiRequestToUploadRequest(r)
+	test.IsNotNil(t, err)
 }

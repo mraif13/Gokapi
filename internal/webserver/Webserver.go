@@ -19,12 +19,14 @@ import (
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage"
+	"github.com/forceu/gokapi/internal/storage/processingstatus"
 	"github.com/forceu/gokapi/internal/webserver/api"
 	"github.com/forceu/gokapi/internal/webserver/authentication"
 	"github.com/forceu/gokapi/internal/webserver/authentication/oauth"
 	"github.com/forceu/gokapi/internal/webserver/authentication/sessionmanager"
 	"github.com/forceu/gokapi/internal/webserver/fileupload"
 	"github.com/forceu/gokapi/internal/webserver/ssl"
+	"github.com/r3labs/sse/v2"
 	"html/template"
 	"io"
 	"io/fs"
@@ -72,6 +74,7 @@ var imageExpiredPicture []byte
 const expiredFile = "static/expired.png"
 
 var srv http.Server
+var sseServer *sse.Server
 
 // Start the webserver on the port set in the config
 func Start() {
@@ -80,6 +83,9 @@ func Start() {
 	var err error
 
 	mux := http.NewServeMux()
+	sseServer = sse.New()
+	sseServer.CreateStream("changes")
+	processingstatus.Init(sseServer)
 
 	if helper.FolderExists("static") {
 		fmt.Println("Found folder 'static', using local folder instead of internal static folder")
@@ -102,6 +108,7 @@ func Start() {
 	mux.HandleFunc("/e2eInfo", requireLogin(e2eInfo, true))
 	mux.HandleFunc("/e2eSetup", requireLogin(showE2ESetup, false))
 	mux.HandleFunc("/error", showError)
+	mux.HandleFunc("/error-auth", showErrorAuth)
 	mux.HandleFunc("/forgotpw", forgotPassword)
 	mux.HandleFunc("/hotlink/", showHotlink)
 	mux.HandleFunc("/index", showIndex)
@@ -110,7 +117,7 @@ func Start() {
 	mux.HandleFunc("/logout", doLogout)
 	mux.HandleFunc("/uploadChunk", requireLogin(uploadChunk, true))
 	mux.HandleFunc("/uploadComplete", requireLogin(uploadComplete, true))
-	mux.HandleFunc("/error-auth", showErrorAuth)
+	mux.HandleFunc("/uploadStatus", requireLogin(sseServer.ServeHTTP, false))
 	mux.Handle("/main.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveDownloadWasm)))
 	mux.Handle("/e2e.wasm", gziphandler.GzipHandler(http.HandlerFunc(serveE2EWasm)))
 	if configuration.Get().Authentication.Method == authentication.OAuth2 {
@@ -152,6 +159,7 @@ func Start() {
 
 // Shutdown closes the webserver gracefully
 func Shutdown() {
+	sseServer.Close()
 	err := srv.Shutdown(context.Background())
 	if err != nil {
 		log.Println(err)
@@ -327,7 +335,7 @@ func showDownload(w http.ResponseWriter, r *http.Request) {
 		UsesHttps:          configuration.UsesHttps(),
 	}
 
-	if storage.RequiresClientDecryption(file) {
+	if file.RequiresClientDecryption() {
 		view.ClientSideDecryption = true
 		if !file.Encryption.IsEndToEndEncrypted {
 			cipher, err := encryption.GetCipherFromFile(file.Encryption)
@@ -523,8 +531,13 @@ type UploadView struct {
 	Logs                     string
 }
 
+// ViewMain is the identifier for the main menu
 const ViewMain = 0
+
+// ViewLogs is the identifier for the log viever menu
 const ViewLogs = 1
+
+// ViewAPI is the identifier for the API menu
 const ViewAPI = 2
 
 // Converts the globalConfig variable to an UploadView struct to pass the infos to
@@ -535,7 +548,7 @@ func (u *UploadView) convertGlobalConfig(view int) *UploadView {
 	switch view {
 	case ViewMain:
 		for _, element := range database.GetAllMetadata() {
-			fileInfo, err := element.ToFileApiOutput(storage.RequiresClientDecryption(element))
+			fileInfo, err := element.ToFileApiOutput()
 			helper.Check(err)
 			result = append(result, fileInfo)
 		}
@@ -593,7 +606,12 @@ func (u *UploadView) convertGlobalConfig(view int) *UploadView {
 // Handling of /uploadChunk
 // If the user is authenticated, this parses the uploaded chunk and stores it
 func uploadChunk(w http.ResponseWriter, r *http.Request) {
+	maxUpload := int64(configuration.Get().MaxFileSizeMB) * 1024 * 1024
 	w.Header().Set("Content-Type", "application/json; charset=UTF-8")
+	if r.ContentLength > maxUpload {
+		responseError(w, storage.ErrorFileTooLarge)
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxUpload)
 	err := fileupload.ProcessNewChunk(w, r, false)
 	responseError(w, err)
 }
@@ -606,7 +624,7 @@ func uploadComplete(w http.ResponseWriter, r *http.Request) {
 	responseError(w, err)
 }
 
-// Outputs an error in json format
+// Outputs an error in json format if err!=nil
 func responseError(w http.ResponseWriter, err error) {
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)

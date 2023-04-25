@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"github.com/forceu/gokapi/internal/configuration"
 	"github.com/forceu/gokapi/internal/configuration/database"
 	"github.com/forceu/gokapi/internal/helper"
 	"github.com/forceu/gokapi/internal/models"
@@ -13,9 +14,6 @@ import (
 	"strings"
 	"time"
 )
-
-//go:generate cp ../../../openapi.json ../web/static/apidocumentation/
-//go:generate echo "Copied openapi.json"
 
 // Process parses the request and executes the API call or returns an error message to the sender
 func Process(w http.ResponseWriter, r *http.Request, maxMemory int) {
@@ -92,6 +90,12 @@ func deleteFile(w http.ResponseWriter, request apiRequest) {
 }
 
 func chunkAdd(w http.ResponseWriter, request apiRequest) {
+	maxUpload := int64(configuration.Get().MaxFileSizeMB) * 1024 * 1024
+	if request.request.ContentLength > maxUpload {
+		sendError(w, http.StatusBadRequest, storage.ErrorFileTooLarge.Error())
+	}
+
+	request.request.Body = http.MaxBytesReader(w, request.request.Body, maxUpload)
 	err := fileupload.ProcessNewChunk(w, request.request, true)
 	if err != nil {
 		sendError(w, http.StatusBadRequest, err.Error())
@@ -115,7 +119,7 @@ func list(w http.ResponseWriter) {
 	timeNow := time.Now().Unix()
 	for _, element := range database.GetAllMetadata() {
 		if !storage.IsExpiredFile(element, timeNow) {
-			file, err := element.ToFileApiOutput(storage.RequiresClientDecryption(element))
+			file, err := element.ToFileApiOutput()
 			helper.Check(err)
 			validFiles = append(validFiles, file)
 		}
@@ -126,6 +130,12 @@ func list(w http.ResponseWriter) {
 }
 
 func upload(w http.ResponseWriter, request apiRequest, maxMemory int) {
+	maxUpload := int64(configuration.Get().MaxFileSizeMB) * 1024 * 1024
+	if request.request.ContentLength > maxUpload {
+		sendError(w, http.StatusBadRequest, storage.ErrorFileTooLarge.Error())
+	}
+
+	request.request.Body = http.MaxBytesReader(w, request.request.Body, maxUpload)
 	err := fileupload.Process(w, request.request, false, maxMemory)
 	if err != nil {
 		sendError(w, http.StatusBadRequest, err.Error())
@@ -154,7 +164,7 @@ func duplicateFile(w http.ResponseWriter, request apiRequest) {
 		sendError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	publicOutput, err := newFile.ToFileApiOutput(storage.RequiresClientDecryption(newFile))
+	publicOutput, err := newFile.ToFileApiOutput()
 	helper.Check(err)
 	result, err := json.Marshal(publicOutput)
 	helper.Check(err)

@@ -1,3 +1,5 @@
+//go:build go1.20
+
 package main
 
 /**
@@ -15,35 +17,32 @@ import (
 	"github.com/forceu/gokapi/internal/environment/flagparser"
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/storage"
-	"github.com/forceu/gokapi/internal/storage/cloudstorage/aws"
+	"github.com/forceu/gokapi/internal/storage/filesystem"
+	"github.com/forceu/gokapi/internal/storage/filesystem/s3filesystem/aws"
 	"github.com/forceu/gokapi/internal/webserver"
 	"github.com/forceu/gokapi/internal/webserver/authentication"
 	"github.com/forceu/gokapi/internal/webserver/ssl"
-	"math/rand"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"syscall"
-	"time"
 )
 
 // versionGokapi is the current version in readable form.
-// The go generate call below needs to be modified as well
-const versionGokapi = "1.6.2"
+// Other version numbers can be modified in /build/go-generate/updateVersionNumbers.go
+const versionGokapi = "1.7.1"
 
-// The following call updates the version numbers
-// Parameters:
-// GokapiVersion, JsAdmin, JsDropzone, JsE2EAdmin
-//go:generate sh "../../build/setVersionTemplate.sh" "1.6.2" "15" "3" "1"
-//go:generate sh -c "cp \"$(go env GOROOT)/misc/wasm/wasm_exec.js\" ../../internal/webserver/web/static/js/ && echo Copied wasm_exec.js"
-//go:generate sh -c "GOOS=js GOARCH=wasm go build -o ../../internal/webserver/web/main.wasm github.com/forceu/gokapi/cmd/wasmdownloader && echo Compiled Downloader WASM module"
-//go:generate sh -c "GOOS=js GOARCH=wasm go build -o ../../internal/webserver/web/e2e.wasm github.com/forceu/gokapi/cmd/wasme2e && echo Compiled E2E WASM module"
+// The following calls update the version numbers, update documentation, minify Js/CSS and build the WASM modules
+//go:generate go run "../../build/go-generate/updateVersionNumbers.go"
+//go:generate go run "../../build/go-generate/updateProtectedUrls.go"
+//go:generate go run "../../build/go-generate/buildWasm.go"
+//go:generate go run "../../build/go-generate/copyStaticFiles.go"
+//go:generate go run "../../build/go-generate/minifyStaticContent.go"
 
 // Main routine that is called on startup
 func main() {
 	passedFlags := flagparser.ParseFlags()
 	showVersion(passedFlags)
-	rand.Seed(time.Now().UnixNano())
 	fmt.Println(logo)
 	fmt.Println("Gokapi v" + versionGokapi + " starting")
 	setup.RunIfFirstStart()
@@ -122,6 +121,7 @@ func initCloudConfig(passedFlags flagparser.MainFlags) {
 	cConfig, ok := cloudconfig.Load()
 	if ok && aws.Init(cConfig.Aws) {
 		fmt.Println("Saving new files to cloud storage")
+		filesystem.SetAws()
 		encLevel := configuration.Get().Encryption.Level
 		if (encLevel == encryption.FullEncryptionStored || encLevel == encryption.FullEncryptionInput) && !passedFlags.DisableCorsCheck {
 			ok, err := aws.IsCorsCorrectlySet(cConfig.Aws.Bucket, configuration.Get().ServerUrl)
@@ -162,7 +162,3 @@ const logo = `
 ██    ██ ██    ██ ██  ██  ██   ██ ██      ██ 
  ██████   ██████  ██   ██ ██   ██ ██      ██ 
                                              `
-
-// Copy go mod file to docker image builder
-//go:generate cp "../../go.mod" "../../build/go.mod"
-//go:generate echo "Copied go.mod to Docker build directory"

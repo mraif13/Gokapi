@@ -9,8 +9,13 @@
 		    <br>
 		    <p class="card-text"><form action="./uploadChunk"
 			      class="dropzone"
-			      id="uploaddropzone"></form>			
-		<p></p><br>
+			      id="uploaddropzone"></form>	
+		
+		<div id="uploadstatus" class="container uploads-container">
+		</div>		
+		<p></p>
+		
+		<br>
 		<div class="container-md">
 		  <div class="row">
 			  <div class="form-group col">
@@ -74,16 +79,17 @@
 			{{ end }}
 						<td scope="col">{{ .DownloadCount }}</td>
 						<td scope="col"><a id="url-href-{{ .Id }}" target="_blank" href="{{ $.Url }}{{ .Id }}">{{ .Id }}</a>{{ if .IsPasswordProtected }} &#128274;{{ end }}</td>
-						<td scope="col"><button id="url-button-{{ .Id }}" type="button" data-clipboard-text="{{ $.Url }}{{ .Id }}" class="copyurl btn btn-outline-light btn-sm">Copy URL</button> 
+						<td scope="col"><button id="url-button-{{ .Id }}" type="button" onclick="showToast()" data-clipboard-text="{{ $.Url }}{{ .Id }}" class="copyurl btn btn-outline-light btn-sm">Copy URL</button> 
 			{{ if ne .HotlinkId "" }}
- 						<button type="button" data-clipboard-text="{{ $.HotlinkUrl }}{{ .HotlinkId }}" class="copyurl btn btn-outline-light btn-sm">Copy Hotlink</button>
+ 						<button type="button" onclick="showToast()" data-clipboard-text="{{ $.HotlinkUrl }}{{ .HotlinkId }}" class="copyurl btn btn-outline-light btn-sm">Copy Hotlink</button>
 			{{ else }}
-				{{ if and (not .IsPasswordProtected) (not .RequiresClientSideDecryption)  }}
-	 						<button type="button" data-clipboard-text="{{ $.GenericHotlinkUrl }}{{ .Id }}" class="copyurl btn btn-outline-light btn-sm">Copy Hotlink</button>
+				{{ if or (.IsPasswordProtected) (.RequiresClientSideDecryption)  }}
+	 						<button type="button"class="copyurl btn btn-outline-light btn-sm disabled">Copy Hotlink</button>
 				{{ else }}
- 							<button type="button"class="copyurl btn btn-outline-light btn-sm disabled">Copy Hotlink</button>
+ 							<button type="button" onclick="showToast()" data-clipboard-text="{{ $.GenericHotlinkUrl }}{{ .Id }}" class="copyurl btn btn-outline-light btn-sm">Copy Hotlink</button>
 				{{ end }}
 			{{ end }}
+						<button type="button" class="btn btn-outline-light btn-sm" onclick="showQrCode('{{ $.Url }}{{ .Id }}');">QR</button>
 						<button type="button" class="btn btn-outline-light btn-sm" onclick="window.location='./delete?id={{ .Id }}'">Delete</button></td>
 					</tr>
 		{{ end }}
@@ -97,16 +103,22 @@
 	    </div>
    	 </div>
 
-	<script src="./js/admin.js?v={{ template "js_admin_version"}}"></script>
+
+	<div id="toastnotification" class="toastnotification">URL copied to clipboard</div>
+	<div id="qroverlay">
+	  <div id="qrcode"></div>
+	</div>
+
+	<script src="./js/min/admin.min.js?v={{ template "js_admin_version"}}"></script>
 	<script>
 		Dropzone.options.uploaddropzone["maxFilesize"] = {{ .MaxFileSize }};
 		Dropzone.options.uploaddropzone["timeout"] = 1200000;
 		Dropzone.options.uploaddropzone["chunking"] = true;
 		Dropzone.options.uploaddropzone["chunkSize"] = 10000000;
 		Dropzone.options.uploaddropzone["forceChunking"] = true;
-		Dropzone.options.uploaddropzone["retryChunks"] = true;
 		Dropzone.options.uploaddropzone["retryChunksLimit"] = 3;
 		Dropzone.options.uploaddropzone["retryChunks"] = true;
+		Dropzone.options.uploaddropzone["previewsContainer"] = false;
 		
 		$(document).ready(function () {
 		    $('#maintable').DataTable({
@@ -123,11 +135,12 @@
 		    }
 		    });
 		});
+		registerChangeHandler();
 	</script>
 
 {{ if .EndToEndEncryption }}
-        <script src="./js/wasm_exec.js"></script>
-	<script src="./js/end2end_admin.js?v={{ template "js_e2eversion"}}"></script>
+        <script src="./js/min/wasm_exec.min.js"></script>
+	<script src="./js/min/end2end_admin.min.js?v={{ template "js_e2eversion"}}"></script>
 	<script>
 		checkIfE2EKeyIsSet();
 	</script>

@@ -17,7 +17,9 @@ import (
 	"github.com/forceu/gokapi/internal/logging"
 	"github.com/forceu/gokapi/internal/models"
 	"github.com/forceu/gokapi/internal/storage/chunking"
-	"github.com/forceu/gokapi/internal/storage/cloudstorage/aws"
+	"github.com/forceu/gokapi/internal/storage/filesystem"
+	"github.com/forceu/gokapi/internal/storage/filesystem/s3filesystem/aws"
+	"github.com/forceu/gokapi/internal/storage/processingstatus"
 	"github.com/forceu/gokapi/internal/webserver/downloadstatus"
 	"github.com/jinzhu/copier"
 	"io"
@@ -127,7 +129,7 @@ func NewFileFromChunk(chunkId string, fileHeader chunking.FileHeader, uploadRequ
 	if chunkId == "" {
 		return models.File{}, errors.New("empty chunk id provided")
 	}
-	if !helper.FileExists(configuration.Get().DataDir + "/chunk-" + chunkId) {
+	if !chunking.FileExists(chunkId) {
 		return models.File{}, errors.New("chunk file does not exist")
 	}
 	file, err := chunking.GetFileByChunkId(chunkId)
@@ -140,33 +142,16 @@ func NewFileFromChunk(chunkId string, fileHeader chunking.FileHeader, uploadRequ
 		return models.File{}, err
 	}
 
-	var hash string
-	if uploadRequest.IsEndToEndEncrypted {
-		hash = "e2e-" + helper.GenerateRandomString(20)
-	} else {
-		hash, err = hashFile(file, isEncryptionRequested())
-		if err != nil {
-			_ = file.Close()
-			return models.File{}, err
-		}
+	processingstatus.Set(chunkId, processingstatus.StatusHashingOrEncrypting)
+	hash, err := getChunkFileHash(file, uploadRequest.IsEndToEndEncrypted)
+	if err != nil {
+		return models.File{}, err
 	}
-
 	metaData := createNewMetaData(hash, fileHeader, uploadRequest)
 
 	fileExists := FileExists(metaData, configuration.Get().DataDir)
 	if fileExists {
-		encryptionLevel := configuration.Get().Encryption.Level
-		previousEncryption, ok := getEncInfoFromExistingFile(metaData.SHA1)
-		if !ok && encryptionLevel != encryption.NoEncryption && encryptionLevel != encryption.EndToEndEncryption {
-			err = os.Remove(configuration.Get().DataDir + "/" + metaData.SHA1)
-			helper.Check(err)
-			fileExists = false
-		} else {
-			metaData.Encryption = previousEncryption
-		}
-	}
-
-	if fileExists {
+		fileExists = copyEncryptionInfo(&metaData)
 		err = file.Close()
 		if err != nil {
 			return models.File{}, err
@@ -176,77 +161,95 @@ func NewFileFromChunk(chunkId string, fileHeader chunking.FileHeader, uploadRequ
 			return models.File{}, err
 		}
 	}
-	if !isEncryptionRequested() {
-		if !fileExists {
+
+	if !fileExists {
+		fileToMove := file
+		if !isEncryptionRequested() {
 			_, err = file.Seek(0, io.SeekStart)
 			if err != nil {
 				return models.File{}, err
 			}
-			if !metaData.IsLocalStorage() {
-				_, err = aws.Upload(file, metaData)
-				if err != nil {
-					return models.File{}, err
-				}
-				database.SaveMetaData(metaData)
-				err = os.Remove(file.Name())
-				helper.Check(err)
-				return metaData, nil
-			}
-			err = os.Rename(file.Name(), configuration.Get().DataDir+"/"+metaData.SHA1)
+		} else {
+			tempFile, err := encryptChunkFile(file, &metaData)
 			if err != nil {
 				return models.File{}, err
 			}
+			fileToMove = tempFile
 		}
-		database.SaveMetaData(metaData)
-		return metaData, nil
-	}
-	if !fileExists {
-		tempFile, err := encryptChunkFile(file, &metaData)
-		defer func() {
-			_ = file.Close()
-			_ = os.Remove(file.Name())
-			_ = tempFile.Close()
-			_ = os.Remove(tempFile.Name())
-		}()
-		if err != nil {
-			return models.File{}, err
-		}
-		if !metaData.IsLocalStorage() {
-			_, err = aws.Upload(tempFile, metaData)
-			if err != nil {
-				return models.File{}, err
-			}
-			tempFile.Close()
-			database.SaveMetaData(metaData)
-			return metaData, nil
-		}
-		tempFile.Close()
-		err = os.Rename(tempFile.Name(), configuration.Get().DataDir+"/"+metaData.SHA1)
+		processingstatus.Set(chunkId, processingstatus.StatusUploading)
+		err = filesystem.ActiveStorageSystem.MoveToFilesystem(fileToMove, metaData)
 		if err != nil {
 			return models.File{}, err
 		}
 	}
-
 	database.SaveMetaData(metaData)
 	return metaData, nil
 }
 
+// copyEncryptionInfo copies encryption info from an existing file,
+// if possible. If not possible due to incompatible encryption level,
+// the old file is removed.
+//
+// The function returns false if the old file was removed.
+func copyEncryptionInfo(metaData *models.File) bool {
+	encryptionLevel := configuration.Get().Encryption.Level
+	previousEncryption, ok := getEncInfoFromExistingFile(metaData.SHA1)
+	if !ok && encryptionLevel != encryption.NoEncryption && encryptionLevel != encryption.EndToEndEncryption {
+		err := os.Remove(configuration.Get().DataDir + "/" + metaData.SHA1)
+		helper.Check(err)
+		return false
+	}
+	metaData.Encryption = previousEncryption
+	return true
+}
+
+func getChunkFileHash(file *os.File, isEndToEndEncryted bool) (string, error) {
+	if isEndToEndEncryted {
+		return "e2e-" + helper.GenerateRandomString(20), nil
+	}
+	hash, err := hashFile(file, isEncryptionRequested())
+	if err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	return hash, nil
+}
+
 func encryptChunkFile(file *os.File, metadata *models.File) (*os.File, error) {
+
+	var removeTempFiles = func() {
+		err := file.Close()
+		if err != nil {
+			fmt.Println("Warning: cannot close plain-text file")
+			fmt.Println(err)
+		}
+		err = os.Remove(file.Name())
+		if err != nil {
+			fmt.Println("Warning: cannot remove plain-text file")
+			fmt.Println(err)
+		}
+
+	}
+
 	_, err := file.Seek(0, io.SeekStart)
 	if err != nil {
+		removeTempFiles()
 		return nil, err
 	}
 	tempFileEnc, err := os.CreateTemp(configuration.Get().DataDir, "upload")
 	if err != nil {
+		removeTempFiles()
 		return nil, err
 	}
 	encInfo := metadata.Encryption
 	err = encryption.Encrypt(&encInfo, file, tempFileEnc)
 	if err != nil {
+		removeTempFiles()
 		return nil, err
 	}
 	_, err = tempFileEnc.Seek(0, io.SeekStart)
 	if err != nil {
+		removeTempFiles()
 		return nil, err
 	}
 	metadata.Encryption = encInfo
@@ -279,6 +282,9 @@ func createNewMetaData(hash string, fileHeader chunking.FileHeader, uploadReques
 	if uploadRequest.IsEndToEndEncrypted {
 		file.Encryption = models.EncryptionInfo{IsEndToEndEncrypted: true, IsEncrypted: true}
 		file.Size = helper.ByteCountSI(uploadRequest.RealSize)
+	}
+	if isEncryptionRequested() {
+		file.Encryption.IsEncrypted = true
 	}
 	if aws.IsAvailable() {
 		if !configuration.Get().PicturesAlwaysLocal || !isPictureFile(file.Name) {
@@ -451,7 +457,10 @@ var imageFileExtensions = []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".b
 
 // If file is an image, create link for hotlinking
 func addHotlink(file *models.File) {
-	if RequiresClientDecryption(*file) {
+	if file.RequiresClientDecryption() {
+		return
+	}
+	if file.PasswordHash != "" {
 		return
 	}
 	if !isPictureFile(file.Name) {
@@ -505,15 +514,6 @@ func GetFileByHotlink(id string) (models.File, bool) {
 	return GetFile(fileId)
 }
 
-// RequiresClientDecryption checks if the file needs to be decrypted by the client
-// (if remote storage or end-to-end encryption)
-func RequiresClientDecryption(file models.File) bool {
-	if !file.Encryption.IsEncrypted {
-		return false
-	}
-	return !file.IsLocalStorage() || file.Encryption.IsEndToEndEncrypted
-}
-
 // ServeFile subtracts a download allowance and serves the file to the browser
 func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDownload bool) {
 	file.DownloadsRemaining = file.DownloadsRemaining - 1
@@ -530,7 +530,7 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 		return
 	}
 	fileData, size := getFileHandler(file, configuration.Get().DataDir)
-	if file.Encryption.IsEncrypted && !RequiresClientDecryption(file) {
+	if file.Encryption.IsEncrypted && !file.RequiresClientDecryption() {
 		if !encryption.IsCorrectKey(file.Encryption, fileData) {
 			w.Write([]byte("Internal error - Error decrypting file, source data might be damaged or an incorrect key has been used"))
 			return
@@ -538,7 +538,7 @@ func ServeFile(file models.File, w http.ResponseWriter, r *http.Request, forceDo
 	}
 	statusId := downloadstatus.SetDownload(file)
 	writeDownloadHeaders(file, w, forceDownload)
-	if file.Encryption.IsEncrypted && !RequiresClientDecryption(file) {
+	if file.Encryption.IsEncrypted && !file.RequiresClientDecryption() {
 		err := encryption.DecryptReader(file.Encryption, fileData, w)
 		if err != nil {
 			w.Write([]byte("Error decrypting file"))
